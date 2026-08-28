@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from time import perf_counter
 
 import numpy as np
@@ -31,8 +31,44 @@ from .postprocess import (
     rhlt_edge_guided_sharpen,
 )
 from .preprocess import fingerprint_foreground_mask, gaussian_denoise, percentile_normalise, to_grayscale
-from .ridge_filter import enhance_ridges_with_gabor, isolate_ridges
+from .ridge_filter import detail_preserving_sharpen, enhance_ridges_with_gabor, isolate_ridges
 from .segmentation import segment_fingerprint
+
+PIPELINE_BUILD = "sigmoid-push-directional-v6"
+
+
+def _adapt_settings_to_image(
+    settings: RHLTConfig,
+    preprocessing: PreprocessingConfig,
+    image_shape: tuple[int, ...],
+) -> tuple[RHLTConfig, PreprocessingConfig]:
+    """Scale filter windows down for very small fingerprint images."""
+    short_side = min(image_shape[:2])
+    if short_side >= 160:
+        return settings, preprocessing
+
+    # The bundled fingerprint samples are roughly 100 px high. Applying the
+    # desktop-size filters to them merges neighbouring ridge lines. Use much
+    # tighter parameters so the Gabor filter resolves individual ridges.
+    tuned_settings = replace(
+        settings,
+        gaussian_sigma=min(settings.gaussian_sigma, 0.25),
+        block_size=min(settings.block_size, 8),
+        gabor_kernel_size=min(settings.gabor_kernel_size, 7),
+        gabor_sigma=min(settings.gabor_sigma, 1.2),
+        gabor_lambda=min(settings.gabor_lambda, 4.0),
+        gabor_blend_strength=max(settings.gabor_blend_strength, 80.0),
+        gabor_strength=max(settings.gabor_strength, 1.5),
+        min_component_area=min(settings.min_component_area, 6),
+    )
+    tuned_preprocessing = replace(
+        preprocessing,
+        gaussian_kernel_size=3,
+        gaussian_sigma=min(preprocessing.gaussian_sigma, 0.25),
+        clahe_clip_limit=min(preprocessing.clahe_clip_limit, 1.2),
+        clahe_grid_size=min(preprocessing.clahe_grid_size, 4),
+    )
+    return tuned_settings, tuned_preprocessing
 
 
 def run_rhlt(
@@ -50,14 +86,18 @@ def run_rhlt(
     diagnostic output; orientation-adaptive Gabor filtering performs ridge restoration.
     """
     settings = config or RHLTConfig()
-    settings.validate()
     started = perf_counter()
     original = shared_ensure_uint8(image)
+    shared_config = preprocessing_config or PreprocessingConfig(
+        gaussian_sigma=settings.gaussian_sigma
+    )
+    settings, shared_config = _adapt_settings_to_image(
+        settings, shared_config, original.shape
+    )
+    settings.validate()
+    shared_config.validate()
 
     if preprocessed_image is None:
-        shared_config = preprocessing_config or PreprocessingConfig(
-            gaussian_sigma=settings.gaussian_sigma
-        )
         preprocessing_stages = preprocess_with_stages(original, shared_config)
         preprocessed = preprocessing_stages["enhanced"]
     else:
@@ -93,13 +133,58 @@ def run_rhlt(
         valid_orientation_blocks,
         block_size=settings.block_size,
     )
-    ridge_restored = enhance_ridges_with_gabor(
+    warnings: list[str] = []
+    ridge_candidate = enhance_ridges_with_gabor(
         preprocessed,
         orientation_field,
         foreground_mask,
         settings,
         valid_blocks=valid_orientation_blocks,
+        base_image=original,
     )
+    original_gray = shared_to_grayscale(original)
+    detail_candidate = detail_preserving_sharpen(original_gray, foreground_mask)
+    candidates = [ridge_candidate, detail_candidate]
+    baseline = calculate_image_metrics(original_gray, original_gray)
+
+    def candidate_score(candidate: np.ndarray) -> tuple[float, dict]:
+        candidate_metrics = calculate_image_metrics(original_gray, candidate)
+        contrast_ratio = candidate_metrics["processed_contrast"] / max(
+            baseline["original_contrast"], 1e-6
+        )
+        sharpness_ratio = candidate_metrics["processed_sharpness"] / max(
+            baseline["original_sharpness"], 1e-6
+        )
+        edge_ratio = candidate_metrics["processed_edge_clarity"] / max(
+            baseline["original_edge_clarity"], 1e-6
+        )
+        ssim_value = candidate_metrics.get("ssim")
+        ssim_is_acceptable = ssim_value is None or ssim_value >= 0.80
+        preserves_quality = (
+            contrast_ratio >= 0.90
+            and sharpness_ratio >= 0.90
+            and edge_ratio >= 0.90
+            and ssim_is_acceptable
+        )
+        if not preserves_quality:
+            return 0.0, candidate_metrics
+        score = (
+            0.20 * min(contrast_ratio, 1.5)
+            + 0.40 * min(sharpness_ratio, 1.5)
+            + 0.40 * min(edge_ratio, 1.5)
+        )
+        return float(score), candidate_metrics
+
+    scored_candidates = [(candidate_score(candidate)[0], candidate) for candidate in candidates]
+    best_score, best_candidate = max(scored_candidates, key=lambda item: item[0])
+    if best_score > 0.98:
+        ridge_restored = best_candidate
+    else:
+        ridge_restored = original_gray
+        warnings.append(
+            "No enhancement candidate improved the measurable ridge detail; "
+            "the already-sharp original was preserved."
+        )
     ridge_binary = isolate_ridges(
         ridge_restored,
         foreground_mask,
@@ -134,14 +219,13 @@ def run_rhlt(
     )
     overlay = minutiae_overlay(ridge_restored, endings, bifurcations)
 
-    warnings: list[str] = []
     if not np.any(foreground_mask):
         warnings.append("Too little ridge variation was found; no foreground was enhanced.")
     elif not np.any(valid_orientation_blocks):
         warnings.append("Foreground was found, but ridge orientation was not reliable enough for Gabor enhancement.")
 
     elapsed_ms = (perf_counter() - started) * 1000.0
-    metrics = calculate_image_metrics(original, ridge_restored)
+    metrics = calculate_image_metrics(original, ridge_restored, foreground_mask=foreground_mask)
     metrics.update(
         metric_bundle(
             ridge_restored,
@@ -153,8 +237,16 @@ def run_rhlt(
     )
     metrics["foreground_coverage_percent"] = float(foreground_mask.mean() * 100.0)
     metrics["valid_orientation_blocks"] = int(valid_orientation_blocks.sum())
+    # Mean coherence over valid blocks: 0 = chaotic, 1 = perfectly parallel ridges.
+    if np.any(valid_orientation_blocks):
+        metrics["mean_orientation_coherence"] = float(
+            orientation_coherence[valid_orientation_blocks].mean()
+        )
+    else:
+        metrics["mean_orientation_coherence"] = 0.0
 
     return {
+        "pipeline_build": PIPELINE_BUILD,
         "algorithm_name": "RHLT Ridge Flow Restoration",
         "status": "warning" if warnings else "ok",
         "warnings": warnings,

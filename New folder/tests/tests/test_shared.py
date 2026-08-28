@@ -34,14 +34,20 @@ def test_calibration_preserves_aspect_ratio_and_tracks_dimensions():
     assert result["processed_dimensions"] == (100, 50)
 
 
-def test_metrics_only_compute_ssim_with_reference():
+def test_metrics_compare_original_and_enhanced():
     image = np.tile(np.arange(64, dtype=np.uint8), (64, 1))
-    without_reference = calculate_image_metrics(image, image)
-    with_reference = calculate_image_metrics(image, image, reference=image)
+    enhanced = np.clip(image.astype(np.int16) + 12, 0, 255).astype(np.uint8)
+    identical = calculate_image_metrics(image, image)
+    changed = calculate_image_metrics(image, enhanced, reference=image)
 
-    assert without_reference["ssim"] is None
-    assert with_reference["ssim"] > 0.999
-    assert without_reference["original_sharpness"] >= 0
+    assert identical["ssim"] > 0.999
+    assert identical["mse"] == 0.0
+    assert identical["psnr"] == float("inf")
+    assert identical["original_entropy"] >= 0
+    assert changed["mse"] > 0
+    assert changed["psnr"] < identical["psnr"]
+    assert changed["ssim_reference"] > 0.9
+    assert changed["original_sharpness"] >= 0
 
 
 def test_folder_loading_ignores_unsupported_and_reports_corrupt_files(tmp_path):

@@ -27,12 +27,13 @@ class RHLTConfig:
     orientation_bins: int = 12
 
     # Conservative orientation-adaptive Gabor parameters.
-    gabor_kernel_size: int = 21
-    gabor_sigma: float = 4.0
+    gabor_kernel_size: int = 17
+    gabor_sigma: float = 3.0
     gabor_lambda: float = 10.0
     gabor_gamma: float = 0.5
     gabor_psi: float = 0.0
     gabor_strength: float = 0.75
+    gabor_blend_strength: float = 48.0
 
     def validate(self) -> None:
         if self.psf_size < 15 or self.psf_size % 2 == 0:
@@ -61,5 +62,7 @@ class RHLTConfig:
             raise ValueError("gabor_kernel_size must be an odd integer >= 5.")
         if self.gabor_sigma <= 0 or self.gabor_lambda <= 0 or self.gabor_gamma <= 0:
             raise ValueError("Gabor sigma, lambda and gamma must be positive.")
-        if not 0.0 <= self.gabor_strength <= 3.0:
-            raise ValueError("gabor_strength must be between 0 and 3.")
+        if not 0.0 <= self.gabor_strength <= 5.0:
+            raise ValueError("gabor_strength must be between 0 and 5.")
+        if self.gabor_blend_strength <= 0:
+            raise ValueError("gabor_blend_strength must be positive.")

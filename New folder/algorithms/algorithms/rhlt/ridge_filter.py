@@ -60,9 +60,13 @@ def enhance_ridges_with_gabor(
     mask: np.ndarray,
     config: RHLTConfig,
     valid_blocks: np.ndarray | None = None,
+    base_image: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Restore weak ridge evidence using the nearest local Gabor orientation."""
+    """Restore ridge evidence while retaining detail from an unblurred base image."""
     gray = to_grayscale(image)
+    base = gray if base_image is None else to_grayscale(base_image)
+    if base.shape != gray.shape:
+        raise ValueError("base_image dimensions must match the processed image")
     foreground = np.asarray(mask, dtype=bool)
     if foreground.shape != gray.shape:
         raise ValueError("mask dimensions must match the image")
@@ -84,7 +88,7 @@ def enhance_ridges_with_gabor(
     if angles.shape != block_mask.shape:
         raise ValueError("orientation and valid_blocks must have equal dimensions")
     if not np.any(foreground) or not np.any(block_mask):
-        return gray.copy()
+        return base.copy()
 
     kernels = _gabor_kernel_bank(
         config.orientation_bins,
@@ -108,16 +112,22 @@ def enhance_ridges_with_gabor(
             x_end = min(width, x_start + config.block_size)
             pixel_bins[y_start:y_end, x_start:x_end] = selected_bin
 
-    float_image = gray.astype(np.float32)
+    analysis_image = gray.astype(np.float32)
+    base_float = base.astype(np.float32)
+    # Scale local-mean sigma proportionally to the image's short side so that
+    # the subtraction does not over-blur small fingerprint images.
+    short_side = min(gray.shape[:2])
+    max_local_sigma = max(0.8, short_side / 40.0)
+    local_sigma = min(max(1.0, config.gabor_lambda / 2.0), max_local_sigma)
     local_mean = cv2.GaussianBlur(
-        float_image,
+        analysis_image,
         (0, 0),
-        sigmaX=max(1.0, config.gabor_lambda / 2.0),
-        sigmaY=max(1.0, config.gabor_lambda / 2.0),
+        sigmaX=local_sigma,
+        sigmaY=local_sigma,
         borderType=cv2.BORDER_REFLECT,
     )
-    centred = float_image - local_mean
-    selected_response = np.zeros_like(float_image)
+    centred = analysis_image - local_mean
+    selected_response = np.zeros_like(analysis_image)
     for index, kernel in enumerate(kernels):
         selected_pixels = (pixel_bins == index) & foreground
         if not np.any(selected_pixels):
@@ -126,14 +136,67 @@ def enhance_ridges_with_gabor(
         selected_response[selected_pixels] = response[selected_pixels]
 
     values = np.abs(selected_response[foreground])
-    response_scale = float(np.percentile(values, 99.0)) if values.size else 0.0
+    # Use p95 (not p99) so the ridge_delta values are larger and more impactful.
+    response_scale = float(np.percentile(values, 95.0)) if values.size else 0.0
     if response_scale <= 1e-6:
-        return gray.copy()
+        return base.copy()
     ridge_delta = np.clip(selected_response / response_scale, -1.0, 1.0)
-    restored = float_image + config.gabor_strength * 32.0 * ridge_delta
-    output = np.clip(restored, 0, 255).astype(np.uint8)
-    output[~foreground] = gray[~foreground]
+
+    # ---- Three-stage aggressive enhancement ----
+    # Stage 1: Strong unsharp mask for edge/ridge sharpening.
+    usm_sigma = min(0.5, max(0.3, short_side / 300.0))
+    usm_blur = cv2.GaussianBlur(
+        base_float, (0, 0), sigmaX=usm_sigma, sigmaY=usm_sigma, borderType=cv2.BORDER_REFLECT
+    )
+    usm_amount = getattr(config, 'gabor_strength', 1.2) * 2.5
+    sharpened = np.clip(base_float + usm_amount * (base_float - usm_blur), 0.0, 255.0)
+
+    # Stage 2: Directional sigmoid push based on Gabor orientation response.
+    # ridge_delta < 0  =>  ridge pixel (push toward black=0)
+    # ridge_delta > 0  =>  valley pixel (push toward white=255)
+    target = np.where(ridge_delta < 0, 0.0, 255.0)
+    push_weight = np.abs(ridge_delta)  # confidence in direction (0..1)
+    blend = getattr(config, 'gabor_blend_strength', 48.0)
+    # Normalise blend to a 0..1 gain that scales the directional push.
+    push_gain = min(1.0, blend / 100.0)
+    pushed = sharpened + push_gain * push_weight * (target - sharpened)
+    pushed = np.clip(pushed, 0.0, 255.0)
+
+    # Stage 3: Per-foreground contrast stretch so the full 0-255 range is used.
+    fg_vals = pushed[foreground]
+    p2, p98 = float(np.percentile(fg_vals, 2.0)), float(np.percentile(fg_vals, 98.0))
+    if p98 > p2 + 1.0:
+        stretched = (pushed - p2) / (p98 - p2) * 255.0
+        pushed = np.clip(stretched, 0.0, 255.0)
+
+    output = pushed.astype(np.uint8)
+    output[~foreground] = base[~foreground]
     return output
+
+
+def detail_preserving_sharpen(
+    image: np.ndarray,
+    mask: np.ndarray,
+    amount: float = 0.6,
+) -> np.ndarray:
+    """Apply mild unsharp masking without smoothing away fine ridge lines."""
+    gray = to_grayscale(image)
+    foreground = np.asarray(mask, dtype=bool)
+    if foreground.shape != gray.shape:
+        raise ValueError("mask dimensions must match the image")
+
+    source = gray.astype(np.float32)
+    local_average = cv2.GaussianBlur(
+        source,
+        (0, 0),
+        sigmaX=0.5,
+        sigmaY=0.5,
+        borderType=cv2.BORDER_REFLECT,
+    )
+    detail = source - local_average
+    sharpened = np.clip(source + amount * detail, 0, 255).astype(np.uint8)
+    sharpened[~foreground] = gray[~foreground]
+    return sharpened
 
 
 def isolate_ridges(

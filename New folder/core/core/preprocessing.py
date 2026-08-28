@@ -13,12 +13,12 @@ class PreprocessingConfig:
     """Conservative defaults suitable for later ridge-orientation estimation."""
 
     gaussian_kernel_size: int = 5
-    gaussian_sigma: float = 1.0
+    gaussian_sigma: float = 0.6
     use_median_filter: bool = False
     median_kernel_size: int = 3
     normalisation_low_percentile: float = 1.0
     normalisation_high_percentile: float = 99.0
-    clahe_clip_limit: float = 2.0
+    clahe_clip_limit: float = 1.5
     clahe_grid_size: int = 8
 
     def validate(self) -> None:

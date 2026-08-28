@@ -248,3 +248,106 @@ def build_pdf_report(
         story.append(comp_table)
         document.build(story)
     return output.getvalue()
+
+def build_comparison_report(
+    filename: str,
+    original: np.ndarray,
+    results: dict[str, dict],
+) -> bytes:
+    """Generate a multi-algorithm comparison PDF report."""
+    output = BytesIO()
+    styles = getSampleStyleSheet()
+
+    document = SimpleDocTemplate(
+        output,
+        pagesize=A4,
+        rightMargin=1.4 * cm,
+        leftMargin=1.4 * cm,
+        topMargin=1.4 * cm,
+        bottomMargin=1.4 * cm,
+    )
+    story = [
+        Paragraph("Multi-Algorithm Comparison Report", styles["Title"]),
+        Paragraph(f"Input file: {escape(filename)}", styles["Normal"]),
+        Paragraph(f"Generated: {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')}", styles["Normal"]),
+        Spacer(1, 0.4 * cm),
+    ]
+
+    with TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+
+        def save_img(key: str, arr: np.ndarray) -> Path:
+            p = tmp / f"{key}.png"
+            p.write_bytes(encode_png(arr))
+            return p
+
+        # Section 1: Visual Comparison
+        story.append(Paragraph("Visual Comparison", styles["Heading2"]))
+        
+        orig_arr = np.asarray(original)
+        orig_path = save_img("original", orig_arr)
+        
+        img_cells = [
+            (_report_image(orig_path, orig_arr, 5.0 * cm, 5.0 * cm), Paragraph("Original", styles["BodyText"]))
+        ]
+        
+        for algo_name, result in results.items():
+            enh_arr = np.asarray(result["enhanced_image"])
+            enh_path = save_img(f"enhanced_{algo_name.replace(' ', '_')}", enh_arr)
+            img_cells.append((
+                _report_image(enh_path, enh_arr, 5.0 * cm, 5.0 * cm),
+                Paragraph(escape(algo_name), styles["BodyText"])
+            ))
+            
+        # Group into rows of 3
+        table_data = []
+        for i in range(0, len(img_cells), 3):
+            row_images = [img_cells[j][0] if j < len(img_cells) else Paragraph("", styles["BodyText"]) for j in range(i, i+3)]
+            row_labels = [img_cells[j][1] if j < len(img_cells) else Paragraph("", styles["BodyText"]) for j in range(i, i+3)]
+            table_data.append(row_images)
+            table_data.append(row_labels)
+            
+        image_table = Table(table_data, colWidths=[5.5 * cm, 5.5 * cm, 5.5 * cm])
+        image_table.setStyle(TableStyle([
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ]))
+        story.append(image_table)
+        story.append(Spacer(1, 0.5 * cm))
+
+        # Section 2: Leaderboard Metrics
+        story.append(Paragraph("Quantitative Benchmark", styles["Heading2"]))
+        
+        comp_data = [["Algorithm", "CII", "Sharpness Δ%", "Edge Δ%", "SSIM", "RVC (orig)", "RVC (enh)", "Time (ms)"]]
+        
+        for algo_name, result in results.items():
+            m = result["metrics"]
+            comp_data.append([
+                algo_name,
+                f"{m.get('cii', 1.0):.2f}x",
+                f"{m.get('sharpness_improvement_pct', 0.0):+.1f}%",
+                f"{m.get('edge_improvement_pct', 0.0):+.1f}%",
+                f"{m.get('ssim', 0.0):.3f}",
+                f"{m.get('original_ridge_valley_clarity', 0.0):.0f}",
+                f"{m.get('processed_ridge_valley_clarity', 0.0):.0f}",
+                f"{result.get('processing_time_ms', 0.0):.1f}"
+            ])
+            
+        comp_table = Table(comp_data, colWidths=[4.0 * cm, 1.8 * cm, 2.5 * cm, 2.0 * cm, 1.5 * cm, 2.0 * cm, 2.0 * cm, 2.0 * cm])
+        comp_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2B4590")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.Color(0.95, 0.95, 0.98)]),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(comp_table)
+        
+        document.build(story)
+    return output.getvalue()

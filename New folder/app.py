@@ -16,7 +16,7 @@ for _pkg in ("algorithms", "core", "reporting"):
 import pandas as pd
 import streamlit as st
 
-from algorithms import ALGORITHM_STATUS
+from algorithms import ALGORITHM_STATUS, get_algorithm_runner
 from algorithms.rhlt import pipeline as rhlt_pipeline_module
 from algorithms.rhlt import ridge_filter as rhlt_ridge_filter_module
 from algorithms.rhlt.config import RHLTConfig
@@ -113,19 +113,22 @@ if not loaded_images:
     st.stop()
 
 
+def _run_selected_algorithm(calibrated, algo_name):
+    """Dispatch to the correct algorithm runner based on the selected name."""
+    if algo_name == "RHLT":
+        return run_rhlt(calibrated, rhlt_config, preprocessing_config=preprocessing_config)
+    else:
+        runner = get_algorithm_runner(algo_name)
+        return runner(calibrated, preprocessing_config=preprocessing_config)
+
+
 def process_loaded_image(item):
     calibration = calibrate_image(item.image, calibration_config)
     calibrated = calibration["image"]
-    result = run_rhlt(
-        calibrated,
-        rhlt_config,
-        preprocessing_config=preprocessing_config,
-    )
+    result = _run_selected_algorithm(calibrated, selected_algorithm)
     preprocessing_stages = result["preprocessing_stages"]
 
     # Never publish a candidate that severely damages measurable ridge detail.
-    # This second guard also protects a rerun if Streamlit retained an older
-    # imported algorithm module in its long-running process.
     result_metrics = result["metrics"]
     sharpness_retained = result_metrics["processed_sharpness"] >= (
         result_metrics["original_sharpness"] * 0.90
@@ -209,6 +212,7 @@ tabs = st.tabs(
         "🧪 RHLT Algorithm Internals",
         "📁 Data Dashboard",
         "🔭 Research Experiment",
+        "🏆 Algorithm Comparison",
     ]
 )
 
@@ -541,6 +545,111 @@ with tabs[5]:
             st.info("Enable the study above only when you need the parameter comparison.")
     else:
         st.info("The ablation study experiment is currently only configured for RHLT.")
+
+# ── Tab 6: Algorithm Comparison ───────────────────────────────────────────────
+with tabs[6]:
+    st.caption(
+        "Run **all available algorithms** on the selected fingerprint image and compare "
+        "their enhancement quality side by side. This satisfies the Technical Requirement "
+        "of benchmarking multiple techniques."
+    )
+
+    run_comparison = st.checkbox(
+        "Run multi-algorithm comparison for the selected image",
+        value=False,
+        help="This runs every available algorithm on the same image. May take a few seconds.",
+    )
+
+    if run_comparison:
+        all_algo_names = [a["name"] for a in ALGORITHM_STATUS if a["available"]]
+        # Get the source image from the currently selected record
+        source_image = selected["source_original"]
+        calibration = calibrate_image(source_image, calibration_config)
+        calibrated = calibration["image"]
+
+        comparison_results = {}
+        with st.spinner(f"Running {len(all_algo_names)} algorithms..."):
+            for algo_name in all_algo_names:
+                try:
+                    result = _run_selected_algorithm(calibrated, algo_name)
+                    result["source_original"] = source_image
+                    comparison_results[algo_name] = result
+                except Exception as exc:
+                    st.error(f"{algo_name} failed: {exc}")
+
+        if comparison_results:
+            # --- Visual comparison: Original + all enhanced ---
+            st.subheader("Visual comparison")
+            vis_cols = st.columns(len(comparison_results) + 1)
+            vis_cols[0].image(source_image, caption="Original", use_container_width=True)
+            for idx, (algo_name, result) in enumerate(comparison_results.items(), 1):
+                vis_cols[idx].image(
+                    result["enhanced_image"],
+                    caption=algo_name,
+                    clamp=True,
+                    use_container_width=True,
+                )
+
+            st.divider()
+
+            # --- Leaderboard table ---
+            st.subheader("🏆 Algorithm Leaderboard")
+            leaderboard_rows = []
+            for algo_name, result in comparison_results.items():
+                m = result["metrics"]
+                leaderboard_rows.append({
+                    "Algorithm": algo_name,
+                    "CII": f"{m.get('cii', 1.0):.2f}×",
+                    "Sharpness Δ%": f"{m.get('sharpness_improvement_pct', 0.0):+.1f}%",
+                    "Edge Clarity Δ%": f"{m.get('edge_improvement_pct', 0.0):+.1f}%",
+                    "SSIM": f"{m.get('ssim', 0.0):.3f}",
+                    "RVC (orig)": f"{m.get('original_ridge_valley_clarity', 0.0):.0f}",
+                    "RVC (enhanced)": f"{m.get('processed_ridge_valley_clarity', 0.0):.0f}",
+                    "Coherence": f"{m.get('mean_orientation_coherence', 0.0):.3f}",
+                    "Minutiae": int(m.get("minutiae_total", 0)),
+                    "Time (ms)": f"{result.get('processing_time_ms', 0.0):.1f}",
+                })
+            lb_df = pd.DataFrame(leaderboard_rows)
+            st.dataframe(lb_df, use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # --- Awards ---
+            st.subheader("Awards")
+            # Best overall: highest CII + sharpness improvement
+            def _score(m):
+                return (
+                    float(m.get("cii", 1.0))
+                    + float(m.get("sharpness_improvement_pct", 0.0)) / 100.0
+                    + float(m.get("edge_improvement_pct", 0.0)) / 100.0
+                )
+            best_overall = max(comparison_results.items(), key=lambda x: _score(x[1]["metrics"]))
+            fastest = min(comparison_results.items(), key=lambda x: x[1].get("processing_time_ms", 9999))
+            sharpest = max(
+                comparison_results.items(),
+                key=lambda x: float(x[1]["metrics"].get("sharpness_improvement_pct", 0.0)),
+            )
+
+            award_cols = st.columns(3)
+            award_cols[0].metric("🥇 Best Overall", best_overall[0])
+            award_cols[1].metric("⚡ Fastest", f"{fastest[0]} ({fastest[1].get('processing_time_ms', 0):.0f} ms)")
+            award_cols[2].metric("🔍 Sharpest", sharpest[0])
+
+            st.divider()
+
+            # --- Download comparison PDF ---
+            from reporting import build_comparison_report
+            comparison_pdf = build_comparison_report(
+                selected_name, source_image, comparison_results,
+            )
+            st.download_button(
+                "⬇️ Download Comparison PDF Report",
+                comparison_pdf,
+                f"{selected_name.rsplit('.', 1)[0]}_comparison_report.pdf",
+                "application/pdf",
+            )
+    else:
+        st.info("Enable the comparison above to benchmark all algorithms on the selected image.")
 
 st.divider()
 download_columns = st.columns(2)

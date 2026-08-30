@@ -48,8 +48,9 @@ from core import (
 )
 from reporting import build_pdf_report, encode_png
 
-
-st.set_page_config(page_title="Fingerprint Enhancement System", page_icon="🔬", layout="wide")
+st.set_page_config(
+    page_title="Fingerprint Enhancement System", page_icon="🔬", layout="wide"
+)
 st.title("Fingerprint Enhancement System")
 APP_BUILD = "rhlt-primary-quality-adaptive-v3.2-2026-08-29"
 st.caption(
@@ -107,14 +108,19 @@ def folder_signature(path: Path) -> tuple[tuple[str, int, int], ...]:
 
 def is_primary_experiment_image(filename: str) -> bool:
     """Select the 13 original BMP samples and deliberately exclude 000*.png."""
-    return re.fullmatch(
-        r"(?:left[1-5]|right[1-5]|special[12]|spectial3)\.bmp",
-        filename,
-        flags=re.IGNORECASE,
-    ) is not None
+    return (
+        re.fullmatch(
+            r"(?:left[1-5]|right[1-5]|special[12]|spectial3)\.bmp",
+            filename,
+            flags=re.IGNORECASE,
+        )
+        is not None
+    )
 
 
-def diagnostic_map_to_uint8(values: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
+def diagnostic_map_to_uint8(
+    values: np.ndarray, mask: np.ndarray | None = None
+) -> np.ndarray:
     array = np.asarray(values, dtype=np.float32)
     valid = np.asarray(mask, dtype=bool) if mask is not None else np.isfinite(array)
     valid &= np.isfinite(array)
@@ -123,21 +129,31 @@ def diagnostic_map_to_uint8(values: np.ndarray, mask: np.ndarray | None = None) 
     if sample.size:
         low, high = float(np.min(sample)), float(np.max(sample))
         if high > low + 1e-9:
-            output[valid] = np.clip((array[valid] - low) * 255.0 / (high - low), 0, 255).astype(np.uint8)
+            output[valid] = np.clip(
+                (array[valid] - low) * 255.0 / (high - low), 0, 255
+            ).astype(np.uint8)
     return output
 
 
-def fingerprint_region(image: np.ndarray, mask: np.ndarray, padding: int = 6) -> np.ndarray:
+def fingerprint_region(
+    image: np.ndarray, mask: np.ndarray, padding: int = 6
+) -> np.ndarray:
     foreground = np.asarray(mask, dtype=bool)
     if foreground.shape != np.asarray(image).shape[:2] or not np.any(foreground):
         return np.asarray(image)
     rows, columns = np.where(foreground)
-    y0, y1 = max(0, int(rows.min()) - padding), min(foreground.shape[0], int(rows.max()) + padding + 1)
-    x0, x1 = max(0, int(columns.min()) - padding), min(foreground.shape[1], int(columns.max()) + padding + 1)
+    y0, y1 = max(0, int(rows.min()) - padding), min(
+        foreground.shape[0], int(rows.max()) + padding + 1
+    )
+    x0, x1 = max(0, int(columns.min()) - padding), min(
+        foreground.shape[1], int(columns.max()) + padding + 1
+    )
     return np.asarray(image)[y0:y1, x0:x1]
 
 
-def amplified_difference(first: np.ndarray, second: np.ndarray, gain: float) -> np.ndarray:
+def amplified_difference(
+    first: np.ndarray, second: np.ndarray, gain: float
+) -> np.ndarray:
     a = np.asarray(first, dtype=np.float32)
     b = np.asarray(second, dtype=np.float32)
     return np.clip(np.abs(a - b) * float(gain), 0, 255).astype(np.uint8)
@@ -145,9 +161,15 @@ def amplified_difference(first: np.ndarray, second: np.ndarray, gain: float) -> 
 
 def reference_restoration_score(metrics: dict) -> float:
     """Transparent clean-reference score used only for research conclusions."""
-    ssim = float(metrics.get("foreground_ssim_reference", metrics.get("ssim_reference", 0.0)))
-    psnr = float(metrics.get("foreground_psnr_reference", metrics.get("psnr_reference", 0.0)))
-    mse = float(metrics.get("foreground_mse_reference", metrics.get("mse_reference", 65025.0)))
+    ssim = float(
+        metrics.get("foreground_ssim_reference", metrics.get("ssim_reference", 0.0))
+    )
+    psnr = float(
+        metrics.get("foreground_psnr_reference", metrics.get("psnr_reference", 0.0))
+    )
+    mse = float(
+        metrics.get("foreground_mse_reference", metrics.get("mse_reference", 65025.0))
+    )
     return float(
         0.50 * np.clip(ssim, 0.0, 1.0)
         + 0.30 * np.clip(psnr / 40.0, 0.0, 1.0)
@@ -161,7 +183,10 @@ def selected_output_label(result: dict) -> str:
         "improved_rhlt": "Proposed Improved RHLT",
         "traditional_rhlt_baseline": "Traditional RHLT (safety fallback)",
         "original_quality_fallback": "Original (quality fallback)",
-    }.get(result.get("selected_output"), str(result.get("algorithm_name", "Enhanced output")))
+    }.get(
+        result.get("selected_output"),
+        str(result.get("algorithm_name", "Enhanced output")),
+    )
 
 
 def comparison_quality_score(metrics: dict) -> float:
@@ -174,7 +199,9 @@ def comparison_quality_score(metrics: dict) -> float:
     rvc = np.clip((processed_rvc / original_rvc) / 1.5, 0.0, 1.0)
     edge = np.clip((processed_edge / original_edge) / 1.5, 0.0, 1.0)
     structural = np.clip(float(metrics.get("ssim", 0.0)), 0.0, 1.0)
-    return float(100.0 * (0.15 * contrast + 0.25 * rvc + 0.20 * edge + 0.40 * structural))
+    return float(
+        100.0 * (0.15 * contrast + 0.25 * rvc + 0.20 * edge + 0.40 * structural)
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -207,8 +234,12 @@ def run_controlled_experiment(
                         "clean": clean.image,
                         "degraded": degraded,
                         "result": result,
-                        "traditional_reference_score": reference_restoration_score(traditional_metrics),
-                        "improved_reference_score": reference_restoration_score(improved_metrics),
+                        "traditional_reference_score": reference_restoration_score(
+                            traditional_metrics
+                        ),
+                        "improved_reference_score": reference_restoration_score(
+                            improved_metrics
+                        ),
                     }
                 )
             except Exception as exc:
@@ -247,7 +278,9 @@ if not loaded_images:
 def _run_selected_algorithm(calibrated, algo_name):
     """Dispatch to the correct algorithm runner based on the selected name."""
     if algo_name == "RHLT":
-        return run_rhlt(calibrated, rhlt_config, preprocessing_config=preprocessing_config)
+        return run_rhlt(
+            calibrated, rhlt_config, preprocessing_config=preprocessing_config
+        )
     else:
         runner = get_algorithm_runner(algo_name)
         return runner(calibrated, preprocessing_config=preprocessing_config)
@@ -311,8 +344,12 @@ for record in records:
             "enhanced_contrast": result_metrics["processed_contrast"],
             "original_sharpness": result_metrics["original_sharpness"],
             "enhanced_sharpness": result_metrics["processed_sharpness"],
-            "foreground_coverage_percent": result_metrics.get("foreground_coverage_percent", 0.0),
-            "valid_orientation_blocks": result_metrics.get("valid_orientation_blocks", 0),
+            "foreground_coverage_percent": result_metrics.get(
+                "foreground_coverage_percent", 0.0
+            ),
+            "valid_orientation_blocks": result_metrics.get(
+                "valid_orientation_blocks", 0
+            ),
         }
     )
 summary = pd.DataFrame(summary_rows)
@@ -421,7 +458,9 @@ with tabs[0]:
             )
 
     elif selected_algorithm == "Unsharp Masking":
-        original_column, conventional_column, adaptive_column, polynomial_column = st.columns(4)
+        original_column, conventional_column, adaptive_column, polynomial_column = (
+            st.columns(4)
+        )
 
         original_column.image(
             selected["source_original"],
@@ -473,6 +512,8 @@ with tabs[0]:
                 "Ridge-Valley Clarity Improvement",
                 "Edge Clarity Improvement",
                 "SSIM",
+                "Detected Minutiae",
+                "Processing Time",
             ],
             "Conventional UM": [
                 f"{conventional_metrics.get('cii', 1.0):.3f}×",
@@ -480,6 +521,8 @@ with tabs[0]:
                 f"{rvc_change(conventional_metrics):+.1f}%",
                 f"{conventional_metrics.get('edge_improvement_pct', 0.0):+.1f}%",
                 f"{conventional_metrics.get('ssim', 0.0):.3f}",
+                f"{selected.get('conventional_unsharp_minutiae', 0)}",
+                f"{selected.get('conventional_unsharp_time_ms', 0.0):.2f} ms",
             ],
             "Adaptive UM": [
                 f"{adaptive_metrics.get('cii', 1.0):.3f}×",
@@ -487,6 +530,8 @@ with tabs[0]:
                 f"{rvc_change(adaptive_metrics):+.1f}%",
                 f"{adaptive_metrics.get('edge_improvement_pct', 0.0):+.1f}%",
                 f"{adaptive_metrics.get('ssim', 0.0):.3f}",
+                f"{selected.get('adaptive_unsharp_minutiae', 0)}",
+                f"{selected.get('adaptive_unsharp_time_ms', 0.0):.2f} ms",
             ],
             "Polynomial UM": [
                 f"{polynomial_metrics.get('cii', 1.0):.3f}×",
@@ -494,19 +539,23 @@ with tabs[0]:
                 f"{rvc_change(polynomial_metrics):+.1f}%",
                 f"{polynomial_metrics.get('edge_improvement_pct', 0.0):+.1f}%",
                 f"{polynomial_metrics.get('ssim', 0.0):.3f}",
+                f"{selected.get('polynomial_unsharp_minutiae', 0)}",
+                f"{selected.get('polynomial_unsharp_time_ms', 0.0):.2f} ms",
             ],
         }
 
         st.dataframe(
-                comparison_data,
-                use_container_width=True,
-                hide_index=True,
+            comparison_data,
+            use_container_width=True,
+            hide_index=True,
         )
-    
+
     else:
         original_column, enhanced_column = st.columns(2)
         original_column.image(
-            selected["source_original"], caption="Original fingerprint", use_container_width=True
+            selected["source_original"],
+            caption="Original fingerprint",
+            use_container_width=True,
         )
         enhanced_column.image(
             selected["enhanced_image"],
@@ -518,7 +567,11 @@ with tabs[0]:
     st.divider()
 
     # --- Metrics comparison table ---
-    evaluated_output = selected_output_label(selected) if selected_algorithm == "RHLT" else selected_algorithm
+    evaluated_output = (
+        selected_output_label(selected)
+        if selected_algorithm == "RHLT"
+        else selected_algorithm
+    )
     overview_details = st.expander(
         f"Detailed metrics · Original vs {evaluated_output}", expanded=False
     )
@@ -528,7 +581,12 @@ with tabs[0]:
     )
     comparison_metrics = [
         ("Contrast", "original_contrast", "processed_contrast", 4),
-        ("Ridge-Valley Clarity (RVC)", "original_ridge_valley_clarity", "processed_ridge_valley_clarity", 1),
+        (
+            "Ridge-Valley Clarity (RVC)",
+            "original_ridge_valley_clarity",
+            "processed_ridge_valley_clarity",
+            1,
+        ),
         ("Sharpness (Laplacian)", "original_sharpness", "processed_sharpness", 1),
         ("Edge Clarity (Sobel)", "original_edge_clarity", "processed_edge_clarity", 2),
     ]
@@ -540,7 +598,9 @@ with tabs[0]:
             continue
         original_value = float(original_value)
         enhanced_value = float(enhanced_value)
-        pct_change = (enhanced_value - original_value) / max(abs(original_value), 1e-9) * 100.0
+        pct_change = (
+            (enhanced_value - original_value) / max(abs(original_value), 1e-9) * 100.0
+        )
         status = "✅" if enhanced_value >= original_value else "⚠️"
         comparison_rows.append(
             {
@@ -564,7 +624,9 @@ with tabs[0]:
             "Status": ssim_status,
         }
     )
-    overview_details.dataframe(pd.DataFrame(comparison_rows), width="stretch", hide_index=True)
+    overview_details.dataframe(
+        pd.DataFrame(comparison_rows), width="stretch", hide_index=True
+    )
 
     # --- Fingerprint structure stats ---
     overview_details.subheader("Fingerprint structure analysis")
@@ -609,9 +671,15 @@ with tabs[2]:
         ("Median / denoised", stages["denoised"]),
         ("Intensity normalised", stages["normalised"]),
         ("CLAHE enhanced", stages["enhanced"]),
-        ("Fingerprint foreground mask", (selected["foreground_mask"].astype("uint8") * 255)),
+        (
+            "Fingerprint foreground mask",
+            (selected["foreground_mask"].astype("uint8") * 255),
+        ),
         ("Ridge flow restored", selected["ridge_restored"]),
-        (f"Skeleton (minutiae: {int(metrics.get('minutiae_total', 0))})", (selected["skeleton"].astype("uint8") * 255)),
+        (
+            f"Skeleton (minutiae: {int(metrics.get('minutiae_total', 0))})",
+            (selected["skeleton"].astype("uint8") * 255),
+        ),
     ]
     for start in range(0, len(stage_images), 4):
         columns = st.columns(4)
@@ -650,15 +718,13 @@ with tabs[1]:
             f"{float(metrics.get('mean_orientation_coherence', 0.0)):.3f}",
             help="Structure tensor coherence averaged over valid blocks. 0 = chaotic, 1 = perfectly parallel ridges.",
         )
-        right.markdown(
-            """
+        right.markdown("""
             **How it works:**
             Sobel gradients estimate the direction *across* each ridge.
             The system rotates that direction by 90° to obtain the ridge *flow*,
             smooths it using doubled angles (to handle the 180° ambiguity),
             and selects the nearest cached Gabor orientation for each valid block.
-            """
-        )
+            """)
     else:
         st.info(f"Ridge orientation data is not provided by {selected_algorithm}.")
 
@@ -687,7 +753,9 @@ with tabs[3]:
         )
 
         # Row 1: RHLT diagnostics
-        rhlt_diagnostics = st.expander("Technical RHLT response and configuration", expanded=False)
+        rhlt_diagnostics = st.expander(
+            "Technical RHLT response and configuration", expanded=False
+        )
         rhlt_diagnostics.subheader("Spiral-phase RHLT diagnostic")
         r1_left, r1_mid, r1_right = rhlt_diagnostics.columns(3)
         r1_left.image(
@@ -702,8 +770,7 @@ with tabs[3]:
             clamp=True,
             use_container_width=True,
         )
-        r1_right.markdown(
-            f"""
+        r1_right.markdown(f"""
             **RHLT configuration**
 
             | Parameter | Value |
@@ -717,8 +784,7 @@ with tabs[3]:
 
             The RHLT edge magnitude drives both the traditional baseline image
             and the per-pixel support weight for the improved RHLT fusion.
-            """
-        )
+            """)
         rhlt_diagnostics.divider()
         # Row 2: Algorithm stages
         st.subheader("Enhancement stages")
@@ -746,14 +812,20 @@ with tabs[3]:
                 use_container_width=True,
             )
         # Per-candidate metrics
-        if "traditional_rhlt_metrics" in selected and "improved_rhlt_metrics" in selected:
-            candidate_details = st.expander("Detailed Traditional vs Improved metrics", expanded=False)
+        if (
+            "traditional_rhlt_metrics" in selected
+            and "improved_rhlt_metrics" in selected
+        ):
+            candidate_details = st.expander(
+                "Detailed Traditional vs Improved metrics", expanded=False
+            )
             candidate_details.caption(
                 selected.get("selection_reason", "No selection reason was recorded.")
             )
             detail_cols = candidate_details.columns(2)
             detail_cols[0].metric(
-                "Maximum fusion weight", f"{selected.get('maximum_fusion_weight', 0.0):.3f}"
+                "Maximum fusion weight",
+                f"{selected.get('maximum_fusion_weight', 0.0):.3f}",
             )
             detail_cols[1].metric(
                 "Valid frequency blocks", int(selected.get("valid_frequency_blocks", 0))
@@ -775,14 +847,18 @@ with tabs[3]:
                     f"{im.get('ssim', 0.0):.3f}",
                 ],
             }
-            candidate_details.dataframe(pd.DataFrame(cand_data), width="stretch", hide_index=True)
+            candidate_details.dataframe(
+                pd.DataFrame(cand_data), width="stretch", hide_index=True
+            )
     else:
         st.info("RHLT Algorithm Internals is specific to the RHLT algorithm.")
 
 # ── Tab 4: Data Dashboard ─────────────────────────────────────────────────────
 with tabs[4]:
     st.subheader("Batch enhancement summary")
-    st.caption("One row per image processed in this session. All key quality indicators are included.")
+    st.caption(
+        "One row per image processed in this session. All key quality indicators are included."
+    )
     # Build enriched summary with the new metrics
     summary_rows = []
     for record in records:
@@ -807,13 +883,25 @@ with tabs[4]:
             }
         )
     enriched_summary = pd.DataFrame(summary_rows)
-    batch_ssim = [float(record["result"]["metrics"].get("ssim", 0.0)) for record in records]
+    batch_ssim = [
+        float(record["result"]["metrics"].get("ssim", 0.0)) for record in records
+    ]
     batch_rvc = [
         (
-            float(record["result"]["metrics"].get("processed_ridge_valley_clarity", 0.0))
-            / max(float(record["result"]["metrics"].get("original_ridge_valley_clarity", 0.0)), 1e-6)
+            float(
+                record["result"]["metrics"].get("processed_ridge_valley_clarity", 0.0)
+            )
+            / max(
+                float(
+                    record["result"]["metrics"].get(
+                        "original_ridge_valley_clarity", 0.0
+                    )
+                ),
+                1e-6,
+            )
             - 1.0
-        ) * 100.0
+        )
+        * 100.0
         for record in records
     ]
     batch_time = [float(record["processing_time_ms"]) for record in records]
@@ -824,8 +912,12 @@ with tabs[4]:
     batch_cards[3].metric("Average time", f"{np.mean(batch_time):.1f} ms")
 
     concise_columns = [
-        "Filename", "Selected output", "CII (contrast)",
-        "Sharpness Δ%", "SSIM", "Time (ms)",
+        "Filename",
+        "Selected output",
+        "CII (contrast)",
+        "Sharpness Δ%",
+        "SSIM",
+        "Time (ms)",
     ]
     st.dataframe(enriched_summary[concise_columns], width="stretch", hide_index=True)
     batch_details = st.expander("View complete batch metrics", expanded=False)
@@ -869,9 +961,7 @@ with tabs[5]:
         "reduction and Gaussian noise are generated deterministically in memory; files "
         "in the dataset are never modified."
     )
-    displayed_level = st.selectbox(
-        "Displayed degradation", list(DEGRADATION_PRESETS)
-    )
+    displayed_level = st.selectbox("Displayed degradation", list(DEGRADATION_PRESETS))
     experiment_settings = st.expander("Experiment settings", expanded=False)
     experiment_controls = experiment_settings.columns(2)
     experiment_seed = int(
@@ -889,12 +979,15 @@ with tabs[5]:
     if selected_algorithm == "RHLT" and run_controlled:
         experiment_paths = sorted(
             (
-                path for path in default_image_folder.iterdir()
+                path
+                for path in default_image_folder.iterdir()
                 if path.is_file() and is_primary_experiment_image(path.name)
             ),
             key=lambda path: path.name.lower(),
         )
-        experiment_payloads = tuple((path.name, path.read_bytes()) for path in experiment_paths)
+        experiment_payloads = tuple(
+            (path.name, path.read_bytes()) for path in experiment_paths
+        )
         with st.spinner(
             f"Running {len(experiment_payloads)} images × 3 deterministic degradation levels..."
         ):
@@ -938,15 +1031,25 @@ with tabs[5]:
                             "Level": experiment_record["level"],
                             "Filename": experiment_record["filename"],
                             "Candidate": candidate_name,
-                            "SSIM reference": candidate_metrics.get("foreground_ssim_reference", 0.0),
-                            "PSNR reference": candidate_metrics.get("foreground_psnr_reference", 0.0),
-                            "MSE reference": candidate_metrics.get("foreground_mse_reference", 0.0),
-                            "Ridge-valley clarity": candidate_metrics.get("processed_ridge_valley_clarity", 0.0),
+                            "SSIM reference": candidate_metrics.get(
+                                "foreground_ssim_reference", 0.0
+                            ),
+                            "PSNR reference": candidate_metrics.get(
+                                "foreground_psnr_reference", 0.0
+                            ),
+                            "MSE reference": candidate_metrics.get(
+                                "foreground_mse_reference", 0.0
+                            ),
+                            "Ridge-valley clarity": candidate_metrics.get(
+                                "processed_ridge_valley_clarity", 0.0
+                            ),
                             "Reference score": reference_score,
                             "Orientation coherence": experiment_result["metrics"].get(
                                 "mean_orientation_coherence", 0.0
                             ),
-                            "Processing time (ms)": experiment_result["processing_time_ms"],
+                            "Processing time (ms)": experiment_result[
+                                "processing_time_ms"
+                            ],
                         }
                     )
                 selection_rows.append(
@@ -976,32 +1079,41 @@ with tabs[5]:
                 }
             ).reset_index()
             aggregate.columns = [
-                " ".join(str(part) for part in column if part).strip()
-                if isinstance(column, tuple)
-                else column
+                (
+                    " ".join(str(part) for part in column if part).strip()
+                    if isinstance(column, tuple)
+                    else column
+                )
                 for column in aggregate.columns
             ]
-            overall = research_frame.groupby("Candidate", sort=False).agg(
-                {
-                    "SSIM reference": ["mean", "std"],
-                    "PSNR reference": ["mean", "std"],
-                    "MSE reference": ["mean", "std"],
-                    "Ridge-valley clarity": ["mean", "std"],
-                    "Reference score": ["mean", "std"],
-                    "Orientation coherence": ["mean", "std"],
-                    "Processing time (ms)": ["mean", "std"],
-                }
-            ).reset_index()
+            overall = (
+                research_frame.groupby("Candidate", sort=False)
+                .agg(
+                    {
+                        "SSIM reference": ["mean", "std"],
+                        "PSNR reference": ["mean", "std"],
+                        "MSE reference": ["mean", "std"],
+                        "Ridge-valley clarity": ["mean", "std"],
+                        "Reference score": ["mean", "std"],
+                        "Orientation coherence": ["mean", "std"],
+                        "Processing time (ms)": ["mean", "std"],
+                    }
+                )
+                .reset_index()
+            )
             overall.insert(0, "Level", "Overall")
             overall.columns = aggregate.columns
             aggregate = pd.concat([aggregate, overall], ignore_index=True)
 
-            overall_means = research_frame.groupby("Candidate", sort=False).mean(numeric_only=True)
+            overall_means = research_frame.groupby("Candidate", sort=False).mean(
+                numeric_only=True
+            )
             traditional_overall = overall_means.loc["Traditional RHLT"]
             improved_overall = overall_means.loc["Proposed Improved RHLT"]
             total_experiments = len(experiment_records)
             score_gain = float(
-                improved_overall["Reference score"] - traditional_overall["Reference score"]
+                improved_overall["Reference score"]
+                - traditional_overall["Reference score"]
             )
             experiment_winner = (
                 "Proposed Improved RHLT" if score_gain >= 0.0 else "Traditional RHLT"
@@ -1015,35 +1127,47 @@ with tabs[5]:
                 "Win rate", f"{improved_wins / max(total_experiments, 1) * 100.0:.0f}%"
             )
             evidence_cards[1].metric(
-                "Reference score", f"{improved_overall['Reference score']:.4f}",
+                "Reference score",
+                f"{improved_overall['Reference score']:.4f}",
                 delta=f"{score_gain:+.4f} vs Traditional",
             )
             evidence_cards[2].metric(
-                "Foreground SSIM", f"{improved_overall['SSIM reference']:.4f}",
+                "Foreground SSIM",
+                f"{improved_overall['SSIM reference']:.4f}",
                 delta=f"{improved_overall['SSIM reference'] - traditional_overall['SSIM reference']:+.4f}",
             )
             evidence_cards[3].metric(
-                "Foreground MSE", f"{improved_overall['MSE reference']:.1f}",
+                "Foreground MSE",
+                f"{improved_overall['MSE reference']:.1f}",
                 delta=f"{improved_overall['MSE reference'] - traditional_overall['MSE reference']:+.1f}",
                 delta_color="inverse",
             )
 
-            level_means = research_frame.groupby(["Level", "Candidate"], sort=False).mean(numeric_only=True)
+            level_means = research_frame.groupby(
+                ["Level", "Candidate"], sort=False
+            ).mean(numeric_only=True)
             level_summary = []
             for level in DEGRADATION_PRESETS:
                 traditional_level = level_means.loc[(level, "Traditional RHLT")]
                 improved_level = level_means.loc[(level, "Proposed Improved RHLT")]
-                level_delta = float(improved_level["Reference score"] - traditional_level["Reference score"])
-                level_summary.append({
-                    "Degradation": level,
-                    "Best": "Improved" if level_delta >= 0.0 else "Traditional",
-                    "Traditional score": f"{traditional_level['Reference score']:.4f}",
-                    "Improved score": f"{improved_level['Reference score']:.4f}",
-                    "Score advantage": f"{level_delta:+.4f}",
-                })
+                level_delta = float(
+                    improved_level["Reference score"]
+                    - traditional_level["Reference score"]
+                )
+                level_summary.append(
+                    {
+                        "Degradation": level,
+                        "Best": "Improved" if level_delta >= 0.0 else "Traditional",
+                        "Traditional score": f"{traditional_level['Reference score']:.4f}",
+                        "Improved score": f"{improved_level['Reference score']:.4f}",
+                        "Score advantage": f"{level_delta:+.4f}",
+                    }
+                )
             st.dataframe(pd.DataFrame(level_summary), width="stretch", hide_index=True)
 
-            research_details = st.expander("View complete experiment statistics", expanded=False)
+            research_details = st.expander(
+                "View complete experiment statistics", expanded=False
+            )
             research_details.dataframe(aggregate, width="stretch", hide_index=True)
             st.download_button(
                 "Download controlled-experiment CSV",
@@ -1067,10 +1191,18 @@ with tabs[5]:
                 [item["filename"] for item in level_records],
                 key="controlled_experiment_image",
             )
-            shown = next(item for item in level_records if item["filename"] == displayed_name)
+            shown = next(
+                item for item in level_records if item["filename"] == displayed_name
+            )
             shown_result = shown["result"]
-            sample_score_delta = shown["improved_reference_score"] - shown["traditional_reference_score"]
-            sample_winner = "Proposed Improved RHLT" if sample_score_delta >= 0.0 else "Traditional RHLT"
+            sample_score_delta = (
+                shown["improved_reference_score"] - shown["traditional_reference_score"]
+            )
+            sample_winner = (
+                "Proposed Improved RHLT"
+                if sample_score_delta >= 0.0
+                else "Traditional RHLT"
+            )
             st.info(
                 f"This sample's best restoration: **{sample_winner}** · "
                 f"reference-score difference {sample_score_delta:+.4f}."
@@ -1082,12 +1214,18 @@ with tabs[5]:
                 ("Proposed Improved RHLT", shown_result["improved_rhlt"]),
             ]
             for column, (caption, image) in zip(st.columns(4), shown_images):
-                column.image(image, caption=caption, clamp=True, use_container_width=True)
+                column.image(
+                    image, caption=caption, clamp=True, use_container_width=True
+                )
 
-            visual_details = st.expander("View crops, difference maps and diagnostic maps", expanded=False)
+            visual_details = st.expander(
+                "View crops, difference maps and diagnostic maps", expanded=False
+            )
             visual_details.subheader("Magnified fingerprint-region crop")
             shown_mask = shown_result["foreground_mask"]
-            for column, (caption, image) in zip(visual_details.columns(4), shown_images):
+            for column, (caption, image) in zip(
+                visual_details.columns(4), shown_images
+            ):
                 column.image(
                     fingerprint_region(image, shown_mask),
                     caption=caption,
@@ -1121,7 +1259,9 @@ with tabs[5]:
                 ("Orientation field", shown_result["orientation_visualisation"]),
                 (
                     "Local frequency",
-                    diagnostic_map_to_uint8(shown_result["local_frequency_map"], shown_mask),
+                    diagnostic_map_to_uint8(
+                        shown_result["local_frequency_map"], shown_mask
+                    ),
                 ),
                 (
                     "Weak-ridge map",
@@ -1129,14 +1269,22 @@ with tabs[5]:
                 ),
                 (
                     "Fusion-weight map",
-                    diagnostic_map_to_uint8(shown_result["fusion_weight_map"], shown_mask),
+                    diagnostic_map_to_uint8(
+                        shown_result["fusion_weight_map"], shown_mask
+                    ),
                 ),
                 ("Gabor support", shown_result["gabor_support"]),
             ]
-            for column, (caption, image) in zip(visual_details.columns(6), diagnostic_images):
-                column.image(image, caption=caption, clamp=True, use_container_width=True)
+            for column, (caption, image) in zip(
+                visual_details.columns(6), diagnostic_images
+            ):
+                column.image(
+                    image, caption=caption, clamp=True, use_container_width=True
+                )
         else:
-            st.error("No original BMP sample was available for the controlled experiment.")
+            st.error(
+                "No original BMP sample was available for the controlled experiment."
+            )
 
     st.divider()
     st.subheader("RHLT component ablation")
@@ -1156,22 +1304,39 @@ with tabs[5]:
                 "Comparing: Traditional baseline · RHLT with apodisation · "
                 "orientation-only support · quality/frequency-adaptive RHLT."
             )
-            ablation = pd.DataFrame(run_ablation(selected["source_original"], rhlt_config))
-            ablation_winner_index = ablation["candidate_quality_score"].astype(float).idxmax()
+            ablation = pd.DataFrame(
+                run_ablation(selected["source_original"], rhlt_config)
+            )
+            ablation_winner_index = (
+                ablation["candidate_quality_score"].astype(float).idxmax()
+            )
             ablation_winner = str(ablation.loc[ablation_winner_index, "variant"])
             st.success(f"Best component combination: **{ablation_winner}**")
-            ablation_summary = pd.DataFrame({
-                "Variant": ablation["variant"],
-                "Recommended": ["✓" if index == ablation_winner_index else "" for index in ablation.index],
-                "Quality score": ablation["candidate_quality_score"].map(lambda value: f"{float(value):.4f}"),
-                "SSIM": ablation["ssim"].map(lambda value: f"{float(value):.3f}"),
-                "RVC change": (
-                    (ablation["processed_ridge_valley_clarity"] / ablation["original_ridge_valley_clarity"] - 1.0)
-                    * 100.0
-                ).map(lambda value: f"{float(value):+.1f}%"),
-            })
+            ablation_summary = pd.DataFrame(
+                {
+                    "Variant": ablation["variant"],
+                    "Recommended": [
+                        "✓" if index == ablation_winner_index else ""
+                        for index in ablation.index
+                    ],
+                    "Quality score": ablation["candidate_quality_score"].map(
+                        lambda value: f"{float(value):.4f}"
+                    ),
+                    "SSIM": ablation["ssim"].map(lambda value: f"{float(value):.3f}"),
+                    "RVC change": (
+                        (
+                            ablation["processed_ridge_valley_clarity"]
+                            / ablation["original_ridge_valley_clarity"]
+                            - 1.0
+                        )
+                        * 100.0
+                    ).map(lambda value: f"{float(value):+.1f}%"),
+                }
+            )
             st.dataframe(ablation_summary, width="stretch", hide_index=True)
-            ablation_details = st.expander("View complete ablation metrics", expanded=False)
+            ablation_details = st.expander(
+                "View complete ablation metrics", expanded=False
+            )
             ablation_details.dataframe(ablation, width="stretch", hide_index=True)
             st.download_button(
                 "⬇️ Download ablation CSV",
@@ -1180,7 +1345,9 @@ with tabs[5]:
                 "text/csv",
             )
         else:
-            st.info("Enable the study above only when you need the parameter comparison.")
+            st.info(
+                "Enable the study above only when you need the parameter comparison."
+            )
     else:
         st.info("The ablation study experiment is currently only configured for RHLT.")
 
@@ -1225,7 +1392,10 @@ with tabs[6]:
             winner_metrics = winner_result["metrics"]
             winner_rvc_change = (
                 float(winner_metrics.get("processed_ridge_valley_clarity", 0.0))
-                / max(float(winner_metrics.get("original_ridge_valley_clarity", 0.0)), 1e-6)
+                / max(
+                    float(winner_metrics.get("original_ridge_valley_clarity", 0.0)),
+                    1e-6,
+                )
                 - 1.0
             ) * 100.0
             st.success(
@@ -1233,17 +1403,22 @@ with tabs[6]:
                 f"**{quality_scores[winner_name]:.1f}/100**."
             )
             winner_cards = st.columns(4)
-            winner_cards[0].metric("Quality score", f"{quality_scores[winner_name]:.1f}/100")
+            winner_cards[0].metric(
+                "Quality score", f"{quality_scores[winner_name]:.1f}/100"
+            )
             winner_cards[1].metric("SSIM", f"{winner_metrics.get('ssim', 0.0):.3f}")
             winner_cards[2].metric("RVC change", f"{winner_rvc_change:+.1f}%")
             winner_cards[3].metric(
-                "Processing time", f"{winner_result.get('processing_time_ms', 0.0):.1f} ms"
+                "Processing time",
+                f"{winner_result.get('processing_time_ms', 0.0):.1f} ms",
             )
 
             # --- Visual comparison: Original + all enhanced ---
             st.subheader("Visual comparison")
             vis_cols = st.columns(len(comparison_results) + 1)
-            vis_cols[0].image(source_image, caption="Original", use_container_width=True)
+            vis_cols[0].image(
+                source_image, caption="Original", use_container_width=True
+            )
             for idx, (algo_name, result) in enumerate(comparison_results.items(), 1):
                 vis_cols[idx].image(
                     result["enhanced_image"],
@@ -1259,34 +1434,50 @@ with tabs[6]:
             leaderboard_rows = []
             for algo_name, result in comparison_results.items():
                 m = result["metrics"]
-                original_rvc = max(float(m.get("original_ridge_valley_clarity", 0.0)), 1e-6)
+                original_rvc = max(
+                    float(m.get("original_ridge_valley_clarity", 0.0)), 1e-6
+                )
                 rvc_change = (
-                    float(m.get("processed_ridge_valley_clarity", 0.0)) / original_rvc - 1.0
+                    float(m.get("processed_ridge_valley_clarity", 0.0)) / original_rvc
+                    - 1.0
                 ) * 100.0
-                leaderboard_rows.append({
-                    "Algorithm": algo_name,
-                    "Recommended": "✓" if algo_name == winner_name else "",
-                    "Quality score": quality_scores[algo_name],
-                    "SSIM": f"{m.get('ssim', 0.0):.3f}",
-                    "RVC change": f"{rvc_change:+.1f}%",
-                    "Time (ms)": f"{result.get('processing_time_ms', 0.0):.1f}",
-                })
-            lb_df = pd.DataFrame(leaderboard_rows).sort_values("Quality score", ascending=False)
-            lb_df["Quality score"] = lb_df["Quality score"].map(lambda value: f"{value:.1f}/100")
+                leaderboard_rows.append(
+                    {
+                        "Algorithm": algo_name,
+                        "Recommended": "✓" if algo_name == winner_name else "",
+                        "Quality score": quality_scores[algo_name],
+                        "SSIM": f"{m.get('ssim', 0.0):.3f}",
+                        "RVC change": f"{rvc_change:+.1f}%",
+                        "Time (ms)": f"{result.get('processing_time_ms', 0.0):.1f}",
+                    }
+                )
+            lb_df = pd.DataFrame(leaderboard_rows).sort_values(
+                "Quality score", ascending=False
+            )
+            lb_df["Quality score"] = lb_df["Quality score"].map(
+                lambda value: f"{value:.1f}/100"
+            )
             st.dataframe(lb_df, width="stretch", hide_index=True)
 
-            comparison_details = st.expander("View complete algorithm metrics", expanded=False)
+            comparison_details = st.expander(
+                "View complete algorithm metrics", expanded=False
+            )
             complete_rows = []
             for algo_name, result in comparison_results.items():
                 complete_rows.append({"Algorithm": algo_name, **result["metrics"]})
-            comparison_details.dataframe(pd.DataFrame(complete_rows), width="stretch", hide_index=True)
+            comparison_details.dataframe(
+                pd.DataFrame(complete_rows), width="stretch", hide_index=True
+            )
 
             st.divider()
 
             # --- Download comparison PDF ---
             from reporting import build_comparison_report
+
             comparison_pdf = build_comparison_report(
-                selected_name, source_image, comparison_results,
+                selected_name,
+                source_image,
+                comparison_results,
             )
             st.download_button(
                 "⬇️ Download Comparison PDF Report",
@@ -1295,7 +1486,9 @@ with tabs[6]:
                 "application/pdf",
             )
     else:
-        st.info("Enable the comparison above to benchmark all algorithms on the selected image.")
+        st.info(
+            "Enable the comparison above to benchmark all algorithms on the selected image."
+        )
 
 st.divider()
 download_columns = st.columns(2)

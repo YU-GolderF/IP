@@ -12,7 +12,12 @@ import cv2
 import numpy as np
 
 from core.metrics import calculate_image_metrics
-from core.preprocessing import PreprocessingConfig, ensure_uint8, preprocess_with_stages, to_grayscale
+from core.preprocessing import (
+    PreprocessingConfig,
+    ensure_uint8,
+    preprocess_with_stages,
+    to_grayscale,
+)
 
 from algorithms.rhlt.orientation import (
     estimate_orientation_field,
@@ -30,6 +35,7 @@ from algorithms.rhlt.segmentation import segment_fingerprint
 from algorithms.rhlt.metrics import metric_bundle
 
 PIPELINE_BUILD = "adaptive-unsharp-mask-v1"
+
 
 def _conventional_unsharp_enhance(
     gray: np.ndarray,
@@ -58,11 +64,14 @@ def _conventional_unsharp_enhance(
     x = gray.astype(np.float32)
 
     # High-pass correction signal z(n,m)
-    high_pass_kernel = np.array([
-        [0, -1, 0],
-        [-1, 4, -1],
-        [0, -1, 0],
-    ], dtype=np.float32)
+    high_pass_kernel = np.array(
+        [
+            [0, -1, 0],
+            [-1, 4, -1],
+            [0, -1, 0],
+        ],
+        dtype=np.float32,
+    )
 
     z = cv2.filter2D(
         x,
@@ -83,6 +92,7 @@ def _conventional_unsharp_enhance(
     result[fg] = y[fg]
 
     return result
+
 
 def _adaptive_unsharp_enhance(
     gray: np.ndarray,
@@ -108,19 +118,25 @@ def _adaptive_unsharp_enhance(
 
     # Equation (3) from Polesel et al. (2000):
     # z_x(n,m) = 2x(n,m) - x(n,m-1) - x(n,m+1)
-    horizontal_kernel = np.array([
-        [0,  0,  0],
-        [-1, 2, -1],
-        [0,  0,  0],
-    ], dtype=np.float32)
+    horizontal_kernel = np.array(
+        [
+            [0, 0, 0],
+            [-1, 2, -1],
+            [0, 0, 0],
+        ],
+        dtype=np.float32,
+    )
 
     # Equation (4) from Polesel et al. (2000):
     # z_y(n,m) = 2x(n,m) - x(n-1,m) - x(n+1,m)
-    vertical_kernel = np.array([
-        [0, -1, 0],
-        [0,  2, 0],
-        [0, -1, 0],
-    ], dtype=np.float32)
+    vertical_kernel = np.array(
+        [
+            [0, -1, 0],
+            [0, 2, 0],
+            [0, -1, 0],
+        ],
+        dtype=np.float32,
+    )
 
     z_x = cv2.filter2D(
         x,
@@ -137,12 +153,12 @@ def _adaptive_unsharp_enhance(
     )
 
     local_mean = cv2.boxFilter(
-    x,
-    ddepth=cv2.CV_32F,
-    ksize=(3, 3),
-    normalize=True,
-    borderType=cv2.BORDER_REFLECT,
-)
+        x,
+        ddepth=cv2.CV_32F,
+        ksize=(3, 3),
+        normalize=True,
+        borderType=cv2.BORDER_REFLECT,
+    )
 
     local_mean_squared = cv2.boxFilter(
         x * x,
@@ -165,11 +181,7 @@ def _adaptive_unsharp_enhance(
 
     smooth_region = (local_variance < tau1) & fg
 
-    medium_region = (
-        (local_variance >= tau1)
-        & (local_variance < tau2)
-        & fg
-    )
+    medium_region = (local_variance >= tau1) & (local_variance < tau2) & fg
 
     high_region = (local_variance >= tau2) & fg
 
@@ -185,13 +197,16 @@ def _adaptive_unsharp_enhance(
     alpha[medium_region] = alpha_dh
     alpha[high_region] = alpha_dl
 
- # Figure 2 from Polesel et al. (2000):
+    # Figure 2 from Polesel et al. (2000):
     # 3 x 3 high-pass operator g(.) used to measure local image dynamics.
-    dynamics_kernel = np.array([
-        [-1, -1, -1],
-        [-1,  8, -1],
-        [-1, -1, -1],
-    ], dtype=np.float32)
+    dynamics_kernel = np.array(
+        [
+            [-1, -1, -1],
+            [-1, 8, -1],
+            [-1, -1, -1],
+        ],
+        dtype=np.float32,
+    )
 
     # g_x(n,m): local dynamics of the input image.
     g_x = cv2.filter2D(
@@ -269,40 +284,28 @@ def _adaptive_unsharp_enhance(
             #          + lambda_x(n,m) * z_x(n,m)
             #          + lambda_y(n,m) * z_y(n,m)
             adaptive_output[n, m] = (
-                x[n, m]
-                + lambda_vector[0] * z_x[n, m]
-                + lambda_vector[1] * z_y[n, m]
+                x[n, m] + lambda_vector[0] * z_x[n, m] + lambda_vector[1] * z_y[n, m]
             )
 
             # Equation (17):
             # R(n,m) = (1-beta)R(n,m-1)
             #          + beta G(n,m)G^T(n,m)
-            R = (
-                (1.0 - beta) * R
-                + beta * np.outer(G, G)
-            )
+            R = (1.0 - beta) * R + beta * np.outer(G, G)
 
             # Equation (16):
             # Lambda(n,m+1) =
             # Lambda(n,m) + 2*mu*e*R^-1*G
-            
+
             # Numerical implementation of R^-1 G.
             # The pseudo-inverse is used to remain stable when R is singular
             # or nearly singular for low-activity image regions.
-            regularised_R = (
-                R.astype(np.float64)
-                + epsilon * np.eye(2, dtype=np.float64)
-            )
+            regularised_R = R.astype(np.float64) + epsilon * np.eye(2, dtype=np.float64)
 
             update_direction = (
-                np.linalg.pinv(regularised_R)
-                @ G.astype(np.float64)
+                np.linalg.pinv(regularised_R) @ G.astype(np.float64)
             ).astype(np.float32)
 
-            lambda_vector = (
-                lambda_vector
-                + 2.0 * mu * e * update_direction
-            )
+            lambda_vector = lambda_vector + 2.0 * mu * e * update_direction
 
     # Keep pixel intensities within the valid 8-bit range.
     adaptive_output = np.clip(
@@ -316,6 +319,7 @@ def _adaptive_unsharp_enhance(
     result[fg] = adaptive_output[fg]
 
     return result
+
 
 def _nonlinear_polynomial_unsharp_enhance(
     gray: np.ndarray,
@@ -336,35 +340,47 @@ def _nonlinear_polynomial_unsharp_enhance(
 
     # Equation (24) - vertical edge sensor:
     # x(m-1,n) - x(m+1,n)
-    vertical_edge_kernel = np.array([
-        [0,  1, 0],
-        [0,  0, 0],
-        [0, -1, 0],
-    ], dtype=np.float32)
+    vertical_edge_kernel = np.array(
+        [
+            [0, 1, 0],
+            [0, 0, 0],
+            [0, -1, 0],
+        ],
+        dtype=np.float32,
+    )
 
     # Vertical high-pass component:
     # 2x(m,n) - x(m-1,n) - x(m+1,n)
-    vertical_highpass_kernel = np.array([
-        [0, -1, 0],
-        [0,  2, 0],
-        [0, -1, 0],
-    ], dtype=np.float32)
+    vertical_highpass_kernel = np.array(
+        [
+            [0, -1, 0],
+            [0, 2, 0],
+            [0, -1, 0],
+        ],
+        dtype=np.float32,
+    )
 
     # Equation (24) - horizontal edge sensor:
     # x(m,n-1) - x(m,n+1)
-    horizontal_edge_kernel = np.array([
-        [0, 0,  0],
-        [1, 0, -1],
-        [0, 0,  0],
-    ], dtype=np.float32)
+    horizontal_edge_kernel = np.array(
+        [
+            [0, 0, 0],
+            [1, 0, -1],
+            [0, 0, 0],
+        ],
+        dtype=np.float32,
+    )
 
     # Horizontal high-pass component:
     # 2x(m,n) - x(m,n-1) - x(m,n+1)
-    horizontal_highpass_kernel = np.array([
-        [0,  0,  0],
-        [-1, 2, -1],
-        [0,  0,  0],
-    ], dtype=np.float32)
+    horizontal_highpass_kernel = np.array(
+        [
+            [0, 0, 0],
+            [-1, 2, -1],
+            [0, 0, 0],
+        ],
+        dtype=np.float32,
+    )
 
     vertical_edge = cv2.filter2D(
         x,
@@ -395,10 +411,9 @@ def _nonlinear_polynomial_unsharp_enhance(
     )
 
     # Equation (24) from Ramponi et al. (1996).
-    z = (
-        ((vertical_edge ** 2) + k) * vertical_highpass
-        + ((horizontal_edge ** 2) + k) * horizontal_highpass
-    )
+    z = ((vertical_edge**2) + k) * vertical_highpass + (
+        (horizontal_edge**2) + k
+    ) * horizontal_highpass
 
     # Standard Unsharp Masking combination:
     # y = x + lambda * z
@@ -410,6 +425,34 @@ def _nonlinear_polynomial_unsharp_enhance(
     result[fg] = y[fg]
 
     return result
+
+
+def _count_candidate_minutiae(
+    image: np.ndarray,
+    foreground: np.ndarray,
+) -> tuple[int, int]:
+    """
+    Detect ridge endings and bifurcations using the same post-processing
+    settings for each Unsharp Masking candidate.
+    """
+
+    ridge_binary = binarise_dark_ridges(image, foreground)
+    ridge_binary = clean_binary(
+        ridge_binary,
+        min_component_area=10,
+    )
+
+    skeleton = make_skeleton(ridge_binary)
+
+    endings, bifurcations = crossing_number_minutiae(
+        skeleton,
+        foreground,
+        border=10,
+        min_distance=8,
+    )
+
+    return len(endings), len(bifurcations)
+
 
 def run_algorithm(
     image: np.ndarray,
@@ -431,20 +474,31 @@ def run_algorithm(
 
     # Segmentation
     foreground_mask, segmentation_blocks = segment_fingerprint(
-        preprocessed, block_size=16, min_block_std=5.0,
+        preprocessed,
+        block_size=16,
+        min_block_std=5.0,
     )
 
     # Orientation field (for consistent comparison metrics)
     raw_orientation, valid_blocks, orientation_coherence = estimate_orientation_field(
-        preprocessed, foreground_mask, block_size=16,
+        preprocessed,
+        foreground_mask,
+        block_size=16,
     )
-    orientation_field = smooth_orientation_field(raw_orientation, valid_blocks, sigma=1.0)
+    orientation_field = smooth_orientation_field(
+        raw_orientation, valid_blocks, sigma=1.0
+    )
     orientation_vis = visualise_orientation_field(
-        preprocessed, orientation_field, valid_blocks, block_size=16,
+        preprocessed,
+        orientation_field,
+        valid_blocks,
+        block_size=16,
     )
 
     # Enhancement
     warnings: list[str] = []
+
+    conventional_started = perf_counter()
 
     conventional_enhanced = _conventional_unsharp_enhance(
         preprocessed,
@@ -452,18 +506,28 @@ def run_algorithm(
         lambda_value=1.0,
     )
 
+    conventional_time_ms = (perf_counter() - conventional_started) * 1000.0
+
+    adaptive_started = perf_counter()
+
     adaptive_enhanced = _adaptive_unsharp_enhance(
         preprocessed,
         foreground_mask,
     )
-    
+
+    adaptive_time_ms = (perf_counter() - adaptive_started) * 1000.0
+
+    polynomial_started = perf_counter()
+
     polynomial_enhanced = _nonlinear_polynomial_unsharp_enhance(
-    preprocessed,
-    foreground_mask,
-    lambda_value=0.00085,
-    k=400.0,
+        preprocessed,
+        foreground_mask,
+        lambda_value=0.00085,
+        k=400.0,
     )
-    
+
+    polynomial_time_ms = (perf_counter() - polynomial_started) * 1000.0
+
     # Separate image-quality metrics for baseline and proposed enhancement.
     conventional_metrics = calculate_image_metrics(
         original,
@@ -476,12 +540,27 @@ def run_algorithm(
         adaptive_enhanced,
         foreground_mask=foreground_mask,
     )
-    
+
     polynomial_metrics = calculate_image_metrics(
-    original,
-    polynomial_enhanced,
-    foreground_mask=foreground_mask,
-)
+        original,
+        polynomial_enhanced,
+        foreground_mask=foreground_mask,
+    )
+
+    conventional_endings, conventional_bifurcations = _count_candidate_minutiae(
+        conventional_enhanced,
+        foreground_mask,
+    )
+
+    adaptive_endings, adaptive_bifurcations = _count_candidate_minutiae(
+        adaptive_enhanced,
+        foreground_mask,
+    )
+
+    polynomial_endings, polynomial_bifurcations = _count_candidate_minutiae(
+        polynomial_enhanced,
+        foreground_mask,
+    )
 
     # Use Adaptive Unsharp Masking as the final enhanced output.
     enhanced = adaptive_enhanced
@@ -490,16 +569,26 @@ def run_algorithm(
     ridge_binary = binarise_dark_ridges(enhanced, foreground_mask)
     ridge_binary = clean_binary(ridge_binary, min_component_area=10)
     skeleton = make_skeleton(ridge_binary)
-    endings, bifurcations = crossing_number_minutiae(skeleton, foreground_mask, border=10, min_distance=8)
+    endings, bifurcations = crossing_number_minutiae(
+        skeleton, foreground_mask, border=10, min_distance=8
+    )
     overlay = minutiae_overlay(enhanced, endings, bifurcations)
 
     elapsed_ms = (perf_counter() - started) * 1000.0
-    metrics = calculate_image_metrics(original, enhanced, foreground_mask=foreground_mask)
-    metrics.update(metric_bundle(enhanced, foreground_mask, len(endings), len(bifurcations), elapsed_ms))
+    metrics = calculate_image_metrics(
+        original, enhanced, foreground_mask=foreground_mask
+    )
+    metrics.update(
+        metric_bundle(
+            enhanced, foreground_mask, len(endings), len(bifurcations), elapsed_ms
+        )
+    )
     metrics["foreground_coverage_percent"] = float(foreground_mask.mean() * 100.0)
     metrics["valid_orientation_blocks"] = int(valid_blocks.sum())
     if np.any(valid_blocks):
-        metrics["mean_orientation_coherence"] = float(orientation_coherence[valid_blocks].mean())
+        metrics["mean_orientation_coherence"] = float(
+            orientation_coherence[valid_blocks].mean()
+        )
     else:
         metrics["mean_orientation_coherence"] = 0.0
 
@@ -537,4 +626,16 @@ def run_algorithm(
         "minutiae_overlay": overlay,
         "metrics": metrics,
         "processing_time_ms": float(elapsed_ms),
+        "conventional_unsharp_time_ms": float(conventional_time_ms),
+        "adaptive_unsharp_time_ms": float(adaptive_time_ms),
+        "polynomial_unsharp_time_ms": float(polynomial_time_ms),
+        "conventional_unsharp_minutiae": int(
+            conventional_endings + conventional_bifurcations
+        ),
+        "adaptive_unsharp_minutiae": int(
+            adaptive_endings + adaptive_bifurcations
+        ),
+        "polynomial_unsharp_minutiae": int(
+            polynomial_endings + polynomial_bifurcations
+        ),
     }

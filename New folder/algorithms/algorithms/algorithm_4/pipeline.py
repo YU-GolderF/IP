@@ -104,7 +104,7 @@ def run_algorithm(
 
     # Post-processing
     ridge_binary = binarise_dark_ridges(enhanced, foreground_mask)
-    ridge_binary = clean_binary(ridge_binary, min_area=10)
+    ridge_binary = clean_binary(ridge_binary, min_component_area=10)
     skeleton = make_skeleton(ridge_binary)
     endings, bifurcations = crossing_number_minutiae(skeleton, foreground_mask, border=10, min_distance=8)
     overlay = minutiae_overlay(enhanced, endings, bifurcations)

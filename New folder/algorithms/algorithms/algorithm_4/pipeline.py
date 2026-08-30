@@ -29,7 +29,7 @@ from algorithms.rhlt.postprocess import (
 from algorithms.rhlt.segmentation import segment_fingerprint
 from algorithms.rhlt.metrics import metric_bundle
 
-PIPELINE_BUILD = "conventional-unsharp-mask-v1"
+PIPELINE_BUILD = "adaptive-unsharp-mask-v1"
 
 def _conventional_unsharp_enhance(
     gray: np.ndarray,
@@ -91,6 +91,8 @@ def _adaptive_unsharp_enhance(
     tau2: float = 200.0,
     alpha_dl: float = 3.0,
     alpha_dh: float = 4.0,
+    mu: float = 0.1,
+    beta: float = 0.5,
 ) -> np.ndarray:
     """
     Apply Adaptive Directional Unsharp Masking.
@@ -183,10 +185,137 @@ def _adaptive_unsharp_enhance(
     alpha[medium_region] = alpha_dh
     alpha[high_region] = alpha_dl
 
-    raise NotImplementedError(
-        "Directional signals and local activity classification implemented; "
-        "adaptive scaling not implemented yet."
+ # Figure 2 from Polesel et al. (2000):
+    # 3 x 3 high-pass operator g(.) used to measure local image dynamics.
+    dynamics_kernel = np.array([
+        [-1, -1, -1],
+        [-1,  8, -1],
+        [-1, -1, -1],
+    ], dtype=np.float32)
+
+    # g_x(n,m): local dynamics of the input image.
+    g_x = cv2.filter2D(
+        x,
+        ddepth=cv2.CV_32F,
+        kernel=dynamics_kernel,
+        borderType=cv2.BORDER_REFLECT,
     )
+
+    # Local dynamics of the horizontal directional correction z_x.
+    g_zx = cv2.filter2D(
+        z_x,
+        ddepth=cv2.CV_32F,
+        kernel=dynamics_kernel,
+        borderType=cv2.BORDER_REFLECT,
+    )
+
+    # Local dynamics of the vertical directional correction z_y.
+    g_zy = cv2.filter2D(
+        z_y,
+        ddepth=cv2.CV_32F,
+        kernel=dynamics_kernel,
+        borderType=cv2.BORDER_REFLECT,
+    )
+
+    # Equation (11):
+    # g_d(n,m) = alpha(n,m) * g_x(n,m)
+    # This represents the desired local dynamics of the output image.
+    g_d = alpha * g_x
+
+    # Equations (14)-(17) from Polesel et al. (2000):
+    # Gauss-Newton adaptation of the directional scaling factors.
+
+    height, width = x.shape
+
+    # Output image before conversion back to uint8.
+    adaptive_output = x.copy()
+
+    # Scaling vector:
+    # Lambda(n,m) = [lambda_x(n,m), lambda_y(n,m)]^T
+    lambda_vector = np.zeros(2, dtype=np.float32)
+
+    # Initial autocorrelation estimate.
+    #
+    # The paper defines the recursive update of R but does not specify
+    # an explicit initial matrix. An identity matrix is used here to
+    # provide a stable, invertible starting condition.
+    R = np.eye(2, dtype=np.float32)
+
+    # Small numerical regularisation used only to keep the matrix
+    # inversion stable when R is close to singular.
+    epsilon = 1e-6
+    identity = np.eye(2, dtype=np.float32)
+
+    # Adapt the scaling factors sequentially along image rows.
+    for n in range(height):
+        for m in range(width):
+
+            # Equation (15):
+            # G(n,m) = [g_zx(n,m), g_zy(n,m)]^T
+            G = np.array(
+                [g_zx[n, m], g_zy[n, m]],
+                dtype=np.float32,
+            )
+
+            # Equation (14):
+            # g_y(n,m) = g_x(n,m) + Lambda^T(n,m) G(n,m)
+            g_y = g_x[n, m] + float(np.dot(lambda_vector, G))
+
+            # Error between desired and current local dynamics.
+            e = g_d[n, m] - g_y
+
+            # Equation (5):
+            # y(n,m) = x(n,m)
+            #          + lambda_x(n,m) * z_x(n,m)
+            #          + lambda_y(n,m) * z_y(n,m)
+            adaptive_output[n, m] = (
+                x[n, m]
+                + lambda_vector[0] * z_x[n, m]
+                + lambda_vector[1] * z_y[n, m]
+            )
+
+            # Equation (17):
+            # R(n,m) = (1-beta)R(n,m-1)
+            #          + beta G(n,m)G^T(n,m)
+            R = (
+                (1.0 - beta) * R
+                + beta * np.outer(G, G)
+            )
+
+            # Equation (16):
+            # Lambda(n,m+1) =
+            # Lambda(n,m) + 2*mu*e*R^-1*G
+            
+            # Numerical implementation of R^-1 G.
+            # The pseudo-inverse is used to remain stable when R is singular
+            # or nearly singular for low-activity image regions.
+            regularised_R = (
+                R.astype(np.float64)
+                + epsilon * np.eye(2, dtype=np.float64)
+            )
+
+            update_direction = (
+                np.linalg.pinv(regularised_R)
+                @ G.astype(np.float64)
+            ).astype(np.float32)
+
+            lambda_vector = (
+                lambda_vector
+                + 2.0 * mu * e * update_direction
+            )
+
+    # Keep pixel intensities within the valid 8-bit range.
+    adaptive_output = np.clip(
+        adaptive_output,
+        0,
+        255,
+    ).astype(np.uint8)
+
+    # Apply the adaptive result only within the detected fingerprint.
+    result = gray.copy()
+    result[fg] = adaptive_output[fg]
+
+    return result
 
 
 def run_algorithm(
@@ -223,12 +352,20 @@ def run_algorithm(
 
     # Enhancement
     warnings: list[str] = []
-    gray = to_grayscale(original)
-    enhanced = _conventional_unsharp_enhance(
-    preprocessed,
-    foreground_mask,
-    lambda_value=1.0,
-)
+
+    conventional_enhanced = _conventional_unsharp_enhance(
+        preprocessed,
+        foreground_mask,
+        lambda_value=1.0,
+    )
+
+    adaptive_enhanced = _adaptive_unsharp_enhance(
+        preprocessed,
+        foreground_mask,
+    )
+
+    # Use Adaptive Unsharp Masking as the final enhanced output.
+    enhanced = adaptive_enhanced
 
     # Post-processing
     ridge_binary = binarise_dark_ridges(enhanced, foreground_mask)
@@ -258,6 +395,8 @@ def run_algorithm(
         "preprocessed": preprocessed,
         "normalised": preprocessing_stages["normalised"],
         "denoised": preprocessing_stages["denoised"],
+        "conventional_unsharp": conventional_enhanced,
+        "adaptive_unsharp": adaptive_enhanced,
         "foreground_mask": foreground_mask,
         "mask": foreground_mask,
         "orientation_field": orientation_field,

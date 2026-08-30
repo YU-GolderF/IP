@@ -421,20 +421,27 @@ with tabs[0]:
             )
 
     elif selected_algorithm == "Unsharp Masking":
-        original_column, baseline_column = st.columns(2)
+        original_column, conventional_column, adaptive_column = st.columns(3)
 
         original_column.image(
-        selected["source_original"],
-        caption="Original Fingerprint",
-        use_container_width=True,
-    )
+            selected["source_original"],
+            caption="Original Fingerprint",
+            use_container_width=True,
+        )
 
-        baseline_column.image(
-        selected["enhanced_image"],
-        caption="Conventional Unsharp Masking",
-        clamp=True,
-        use_container_width=True,
-    )
+        conventional_column.image(
+            selected["conventional_unsharp"],
+            caption="Conventional Unsharp Masking",
+            clamp=True,
+            use_container_width=True,
+        )
+
+        adaptive_column.image(
+            selected["adaptive_unsharp"],
+            caption="Proposed Adaptive Unsharp Masking",
+            clamp=True,
+            use_container_width=True,
+        )
     
     else:
         original_column, enhanced_column = st.columns(2)

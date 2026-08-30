@@ -275,15 +275,36 @@ if not loaded_images:
     st.stop()
 
 
-def _run_selected_algorithm(calibrated, algo_name):
+def _run_selected_algorithm(
+    calibrated,
+    algo_name,
+    *,
+    final_only=False,
+):
     """Dispatch to the correct algorithm runner based on the selected name."""
+
     if algo_name == "RHLT":
         return run_rhlt(
-            calibrated, rhlt_config, preprocessing_config=preprocessing_config
+            calibrated,
+            rhlt_config,
+            preprocessing_config=preprocessing_config,
         )
-    else:
-        runner = get_algorithm_runner(algo_name)
-        return runner(calibrated, preprocessing_config=preprocessing_config)
+
+    runner = get_algorithm_runner(algo_name)
+
+    # The four-member comparison should run only the final
+    # selected Polynomial UM pipeline.
+    if algo_name == "Unsharp Masking":
+        return runner(
+            calibrated,
+            preprocessing_config=preprocessing_config,
+            final_only=final_only,
+        )
+
+    return runner(
+        calibrated,
+        preprocessing_config=preprocessing_config,
+    )
 
 
 def process_loaded_image(item):
@@ -1553,7 +1574,11 @@ with tabs[6]:
         with st.spinner(f"Running {len(all_algo_names)} algorithms..."):
             for algo_name in all_algo_names:
                 try:
-                    result = _run_selected_algorithm(calibrated, algo_name)
+                    result = _run_selected_algorithm(
+                        calibrated,
+                        algo_name,
+                        final_only=True,
+                    )
                     result["source_original"] = source_image
                     comparison_results[algo_name] = result
                 except Exception as exc:

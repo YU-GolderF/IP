@@ -1,4 +1,4 @@
-"""Median + Unsharp Mask fingerprint enhancement — placeholder for Member 4."""
+"""Unsharp Masking fingerprint enhancement — Member 4."""
 
 from .pipeline import run_algorithm
 

@@ -4,7 +4,7 @@ ALGORITHM_STATUS = (
     {"key": "rhlt", "name": "RHLT", "owner": "Member 1", "available": True},
     {"key": "algorithm_2", "name": "Gabor Filter Bank", "owner": "Member 2", "available": True},
     {"key": "algorithm_3", "name": "Histogram Equalization", "owner": "Member 3", "available": True},
-    {"key": "algorithm_4", "name": "Median + Unsharp Mask", "owner": "Member 4", "available": True},
+    {"key": "algorithm_4", "name": "Unsharp Masking", "owner": "Member 4", "available": True},
 )
 
 
@@ -19,7 +19,7 @@ def get_algorithm_runner(algorithm_name: str):
     elif algorithm_name == "Histogram Equalization":
         from algorithms.algorithm_3.pipeline import run_algorithm
         return run_algorithm
-    elif algorithm_name == "Median + Unsharp Mask":
+    elif algorithm_name == "Unsharp Masking":
         from algorithms.algorithm_4.pipeline import run_algorithm
         return run_algorithm
     else:

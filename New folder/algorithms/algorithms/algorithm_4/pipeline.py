@@ -1,8 +1,7 @@
-"""Median Filter + Unsharp Mask fingerprint enhancement — placeholder for Member 4.
+"""Unsharp Masking fingerprint enhancement — Member 4.
 
-This implements a classic spatial-domain approach: median filtering for noise
-removal followed by unsharp masking for ridge sharpening. Replace this file
-with your own implementation while keeping the same run_algorithm() interface.
+Implements conventional linear Unsharp Masking as the baseline method,
+with an enhanced adaptive Unsharp Masking method for comparison.
 """
 
 from __future__ import annotations
@@ -85,35 +84,109 @@ def _conventional_unsharp_enhance(
 
     return result
 
-    """Apply median denoising followed by aggressive unsharp masking."""
+def _adaptive_unsharp_enhance(
+    gray: np.ndarray,
+    foreground: np.ndarray,
+    tau1: float = 60.0,
+    tau2: float = 200.0,
+    alpha_dl: float = 3.0,
+    alpha_dh: float = 4.0,
+) -> np.ndarray:
+    """
+    Apply Adaptive Directional Unsharp Masking.
+
+    Based on Polesel et al. (2000).
+    This function will implement the proposed enhanced method.
+    """
+
     fg = foreground.astype(bool)
 
-    # Stage 1: Median filter for salt-and-pepper noise removal
-    denoised = cv2.medianBlur(gray, 5)
+    # Convert to float so negative directional responses are preserved.
+    x = gray.astype(np.float32)
 
-    # Stage 2: Bilateral filter to preserve edges while smoothing
-    smoothed = cv2.bilateralFilter(denoised, d=7, sigmaColor=50, sigmaSpace=50)
+    # Equation (3) from Polesel et al. (2000):
+    # z_x(n,m) = 2x(n,m) - x(n,m-1) - x(n,m+1)
+    horizontal_kernel = np.array([
+        [0,  0,  0],
+        [-1, 2, -1],
+        [0,  0,  0],
+    ], dtype=np.float32)
 
-    # Stage 3: Unsharp mask (strong)
-    blurred = cv2.GaussianBlur(smoothed.astype(np.float32), (0, 0), 2.0)
-    sharpened = cv2.addWeighted(
-        smoothed.astype(np.float32), 2.0,
-        blurred, -1.0,
-        0,
+    # Equation (4) from Polesel et al. (2000):
+    # z_y(n,m) = 2x(n,m) - x(n-1,m) - x(n+1,m)
+    vertical_kernel = np.array([
+        [0, -1, 0],
+        [0,  2, 0],
+        [0, -1, 0],
+    ], dtype=np.float32)
+
+    z_x = cv2.filter2D(
+        x,
+        ddepth=cv2.CV_32F,
+        kernel=horizontal_kernel,
+        borderType=cv2.BORDER_REFLECT,
     )
-    output = np.clip(sharpened, 0, 255).astype(np.uint8)
 
-    # Stage 4: Contrast stretch on foreground only
-    fg_vals = output[fg]
-    if fg_vals.size > 0:
-        p2, p98 = float(np.percentile(fg_vals, 2)), float(np.percentile(fg_vals, 98))
-        if p98 > p2 + 1.0:
-            stretched = (output.astype(np.float32) - p2) / (p98 - p2) * 255.0
-            output = np.clip(stretched, 0, 255).astype(np.uint8)
+    z_y = cv2.filter2D(
+        x,
+        ddepth=cv2.CV_32F,
+        kernel=vertical_kernel,
+        borderType=cv2.BORDER_REFLECT,
+    )
 
-    result = gray.copy()
-    result[fg] = output[fg]
-    return result
+    local_mean = cv2.boxFilter(
+    x,
+    ddepth=cv2.CV_32F,
+    ksize=(3, 3),
+    normalize=True,
+    borderType=cv2.BORDER_REFLECT,
+)
+
+    local_mean_squared = cv2.boxFilter(
+        x * x,
+        ddepth=cv2.CV_32F,
+        ksize=(3, 3),
+        normalize=True,
+        borderType=cv2.BORDER_REFLECT,
+    )
+
+    # v_i(n,m) = mean(x^2) - mean(x)^2
+    local_variance = local_mean_squared - (local_mean * local_mean)
+
+    # Protect against very small negative values caused by floating-point rounding.
+    local_variance = np.maximum(local_variance, 0.0)
+
+    # Region classification based on local variance:
+    # smooth region:        v_i < tau1
+    # medium-contrast:      tau1 <= v_i < tau2
+    # high-contrast region: v_i >= tau2
+
+    smooth_region = (local_variance < tau1) & fg
+
+    medium_region = (
+        (local_variance >= tau1)
+        & (local_variance < tau2)
+        & fg
+    )
+
+    high_region = (local_variance >= tau2) & fg
+
+    # Equation (12) from Polesel et al. (2000):
+    # Desired activity gain alpha(n,m).
+    #
+    # Smooth regions: no activity increase.
+    # Medium-contrast regions: maximum enhancement.
+    # High-contrast regions: moderate enhancement.
+
+    alpha = np.ones_like(x, dtype=np.float32)
+
+    alpha[medium_region] = alpha_dh
+    alpha[high_region] = alpha_dl
+
+    raise NotImplementedError(
+        "Directional signals and local activity classification implemented; "
+        "adaptive scaling not implemented yet."
+    )
 
 
 def run_algorithm(
@@ -122,7 +195,7 @@ def run_algorithm(
     preprocessing_config: PreprocessingConfig | None = None,
 ) -> dict:
     """
-    Enhance a fingerprint using Median Filter + Unsharp Mask.
+    Enhance a fingerprint using Unsharp Masking.
 
     Returns a dict with the standard algorithm result structure.
     """

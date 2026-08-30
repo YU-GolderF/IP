@@ -30,10 +30,61 @@ from algorithms.rhlt.postprocess import (
 from algorithms.rhlt.segmentation import segment_fingerprint
 from algorithms.rhlt.metrics import metric_bundle
 
-PIPELINE_BUILD = "median-unsharp-mask-v1"
+PIPELINE_BUILD = "conventional-unsharp-mask-v1"
 
+def _conventional_unsharp_enhance(
+    gray: np.ndarray,
+    foreground: np.ndarray,
+    lambda_value: float = 1.0,
+) -> np.ndarray:
+    """
+    Apply conventional linear Unsharp Masking.
 
-def _median_unsharp_enhance(gray: np.ndarray, foreground: np.ndarray) -> np.ndarray:
+    Based on Polesel et al. (2000):
+
+        y(n,m) = x(n,m) + lambda * z(n,m)
+
+    where:
+
+        z(n,m) = 4x(n,m)
+                 - x(n-1,m)
+                 - x(n+1,m)
+                 - x(n,m-1)
+                 - x(n,m+1)
+    """
+
+    fg = foreground.astype(bool)
+
+    # Convert to float so negative high-pass values are preserved.
+    x = gray.astype(np.float32)
+
+    # High-pass correction signal z(n,m)
+    high_pass_kernel = np.array([
+        [0, -1, 0],
+        [-1, 4, -1],
+        [0, -1, 0],
+    ], dtype=np.float32)
+
+    z = cv2.filter2D(
+        x,
+        ddepth=cv2.CV_32F,
+        kernel=high_pass_kernel,
+        borderType=cv2.BORDER_REFLECT,
+    )
+
+    # Conventional Unsharp Masking:
+    # y(n,m) = x(n,m) + lambda * z(n,m)
+    y = x + lambda_value * z
+
+    # Convert result back to a valid 8-bit image.
+    y = np.clip(y, 0, 255).astype(np.uint8)
+
+    # Only enhance the detected fingerprint foreground.
+    result = gray.copy()
+    result[fg] = y[fg]
+
+    return result
+
     """Apply median denoising followed by aggressive unsharp masking."""
     fg = foreground.astype(bool)
 
@@ -100,11 +151,15 @@ def run_algorithm(
     # Enhancement
     warnings: list[str] = []
     gray = to_grayscale(original)
-    enhanced = _median_unsharp_enhance(preprocessed, foreground_mask)
+    enhanced = _conventional_unsharp_enhance(
+    preprocessed,
+    foreground_mask,
+    lambda_value=1.0,
+)
 
     # Post-processing
     ridge_binary = binarise_dark_ridges(enhanced, foreground_mask)
-    ridge_binary = clean_binary(ridge_binary, min_area=10)
+    ridge_binary = clean_binary(ridge_binary, min_component_area=10)
     skeleton = make_skeleton(ridge_binary)
     endings, bifurcations = crossing_number_minutiae(skeleton, foreground_mask, border=10, min_distance=8)
     overlay = minutiae_overlay(enhanced, endings, bifurcations)
@@ -121,7 +176,7 @@ def run_algorithm(
 
     return {
         "pipeline_build": PIPELINE_BUILD,
-        "algorithm_name": "Median + Unsharp Mask",
+        "algorithm_name": "Unsharp Masking",
         "status": "warning" if warnings else "ok",
         "warnings": warnings,
         "original": original,

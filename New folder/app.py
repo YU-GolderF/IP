@@ -421,7 +421,7 @@ with tabs[0]:
             )
 
     elif selected_algorithm == "Unsharp Masking":
-        original_column, conventional_column, adaptive_column = st.columns(3)
+        original_column, conventional_column, adaptive_column, polynomial_column = st.columns(4)
 
         original_column.image(
             selected["source_original"],
@@ -438,9 +438,69 @@ with tabs[0]:
 
         adaptive_column.image(
             selected["adaptive_unsharp"],
-            caption="Proposed Adaptive Unsharp Masking",
+            caption="Enhancement 1: Adaptive UM",
             clamp=True,
             use_container_width=True,
+        )
+
+        polynomial_column.image(
+            selected["polynomial_unsharp"],
+            caption="Enhancement 2: Nonlinear Polynomial UM",
+            clamp=True,
+            use_container_width=True,
+        )
+
+        st.markdown("### Unsharp Masking Enhancement Comparison")
+
+        conventional_metrics = selected["conventional_unsharp_metrics"]
+        adaptive_metrics = selected["adaptive_unsharp_metrics"]
+        polynomial_metrics = selected["polynomial_unsharp_metrics"]
+
+        def rvc_change(candidate_metrics):
+            original_rvc = max(
+                float(candidate_metrics.get("original_ridge_valley_clarity", 0.0)),
+                1e-6,
+            )
+            processed_rvc = float(
+                candidate_metrics.get("processed_ridge_valley_clarity", 0.0)
+            )
+            return (processed_rvc / original_rvc - 1.0) * 100.0
+
+        comparison_data = {
+            "Metric": [
+                "CII",
+                "Sharpness Improvement",
+                "Ridge-Valley Clarity Improvement",
+                "Edge Clarity Improvement",
+                "SSIM",
+            ],
+            "Conventional UM": [
+                f"{conventional_metrics.get('cii', 1.0):.3f}×",
+                f"{conventional_metrics.get('sharpness_improvement_pct', 0.0):+.1f}%",
+                f"{rvc_change(conventional_metrics):+.1f}%",
+                f"{conventional_metrics.get('edge_improvement_pct', 0.0):+.1f}%",
+                f"{conventional_metrics.get('ssim', 0.0):.3f}",
+            ],
+            "Adaptive UM": [
+                f"{adaptive_metrics.get('cii', 1.0):.3f}×",
+                f"{adaptive_metrics.get('sharpness_improvement_pct', 0.0):+.1f}%",
+                f"{rvc_change(adaptive_metrics):+.1f}%",
+                f"{adaptive_metrics.get('edge_improvement_pct', 0.0):+.1f}%",
+                f"{adaptive_metrics.get('ssim', 0.0):.3f}",
+            ],
+            "Polynomial UM": [
+                f"{polynomial_metrics.get('cii', 1.0):.3f}×",
+                f"{polynomial_metrics.get('sharpness_improvement_pct', 0.0):+.1f}%",
+                f"{rvc_change(polynomial_metrics):+.1f}%",
+                f"{polynomial_metrics.get('edge_improvement_pct', 0.0):+.1f}%",
+                f"{polynomial_metrics.get('ssim', 0.0):.3f}",
+            ],
+        }
+
+        st.dataframe(
+                comparison_data,
+                use_container_width=True,
+                hide_index=True,
         )
     
     else:

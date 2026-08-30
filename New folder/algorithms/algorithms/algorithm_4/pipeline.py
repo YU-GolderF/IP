@@ -317,6 +317,99 @@ def _adaptive_unsharp_enhance(
 
     return result
 
+def _nonlinear_polynomial_unsharp_enhance(
+    gray: np.ndarray,
+    foreground: np.ndarray,
+    lambda_value: float = 0.00085,
+    k: float = 400.0,
+) -> np.ndarray:
+    """
+    Apply nonlinear polynomial Unsharp Masking (Type 1A-Pk).
+
+    Based on Ramponi et al. (1996), Equation (24).
+    The nonlinear edge sensor strengthens meaningful edges while
+    reducing the uniform amplification produced by linear UM.
+    """
+
+    fg = foreground.astype(bool)
+    x = gray.astype(np.float32)
+
+    # Equation (24) - vertical edge sensor:
+    # x(m-1,n) - x(m+1,n)
+    vertical_edge_kernel = np.array([
+        [0,  1, 0],
+        [0,  0, 0],
+        [0, -1, 0],
+    ], dtype=np.float32)
+
+    # Vertical high-pass component:
+    # 2x(m,n) - x(m-1,n) - x(m+1,n)
+    vertical_highpass_kernel = np.array([
+        [0, -1, 0],
+        [0,  2, 0],
+        [0, -1, 0],
+    ], dtype=np.float32)
+
+    # Equation (24) - horizontal edge sensor:
+    # x(m,n-1) - x(m,n+1)
+    horizontal_edge_kernel = np.array([
+        [0, 0,  0],
+        [1, 0, -1],
+        [0, 0,  0],
+    ], dtype=np.float32)
+
+    # Horizontal high-pass component:
+    # 2x(m,n) - x(m,n-1) - x(m,n+1)
+    horizontal_highpass_kernel = np.array([
+        [0,  0,  0],
+        [-1, 2, -1],
+        [0,  0,  0],
+    ], dtype=np.float32)
+
+    vertical_edge = cv2.filter2D(
+        x,
+        cv2.CV_32F,
+        vertical_edge_kernel,
+        borderType=cv2.BORDER_REFLECT,
+    )
+
+    vertical_highpass = cv2.filter2D(
+        x,
+        cv2.CV_32F,
+        vertical_highpass_kernel,
+        borderType=cv2.BORDER_REFLECT,
+    )
+
+    horizontal_edge = cv2.filter2D(
+        x,
+        cv2.CV_32F,
+        horizontal_edge_kernel,
+        borderType=cv2.BORDER_REFLECT,
+    )
+
+    horizontal_highpass = cv2.filter2D(
+        x,
+        cv2.CV_32F,
+        horizontal_highpass_kernel,
+        borderType=cv2.BORDER_REFLECT,
+    )
+
+    # Equation (24) from Ramponi et al. (1996).
+    z = (
+        ((vertical_edge ** 2) + k) * vertical_highpass
+        + ((horizontal_edge ** 2) + k) * horizontal_highpass
+    )
+
+    # Standard Unsharp Masking combination:
+    # y = x + lambda * z
+    y = x + lambda_value * z
+
+    y = np.clip(y, 0, 255).astype(np.uint8)
+
+    result = gray.copy()
+    result[fg] = y[fg]
+
+    return result
 
 def run_algorithm(
     image: np.ndarray,
@@ -363,6 +456,32 @@ def run_algorithm(
         preprocessed,
         foreground_mask,
     )
+    
+    polynomial_enhanced = _nonlinear_polynomial_unsharp_enhance(
+    preprocessed,
+    foreground_mask,
+    lambda_value=0.00085,
+    k=400.0,
+    )
+    
+    # Separate image-quality metrics for baseline and proposed enhancement.
+    conventional_metrics = calculate_image_metrics(
+        original,
+        conventional_enhanced,
+        foreground_mask=foreground_mask,
+    )
+
+    adaptive_metrics = calculate_image_metrics(
+        original,
+        adaptive_enhanced,
+        foreground_mask=foreground_mask,
+    )
+    
+    polynomial_metrics = calculate_image_metrics(
+    original,
+    polynomial_enhanced,
+    foreground_mask=foreground_mask,
+)
 
     # Use Adaptive Unsharp Masking as the final enhanced output.
     enhanced = adaptive_enhanced
@@ -397,6 +516,10 @@ def run_algorithm(
         "denoised": preprocessing_stages["denoised"],
         "conventional_unsharp": conventional_enhanced,
         "adaptive_unsharp": adaptive_enhanced,
+        "polynomial_unsharp": polynomial_enhanced,
+        "conventional_unsharp_metrics": conventional_metrics,
+        "adaptive_unsharp_metrics": adaptive_metrics,
+        "polynomial_unsharp_metrics": polynomial_metrics,
         "foreground_mask": foreground_mask,
         "mask": foreground_mask,
         "orientation_field": orientation_field,

@@ -20,7 +20,7 @@ def get_algorithm_runner(algorithm_name: str):
         from algorithms.algorithm_3.pipeline import run_algorithm
         return run_algorithm
     elif algorithm_name == "Unsharp Masking":
-        from algorithms.algorithm_4.pipeline import run_algorithm
+        from algorithms.unsharp_masking.pipeline import run_algorithm
         return run_algorithm
     else:
         raise ValueError(f"Unknown algorithm: {algorithm_name}")

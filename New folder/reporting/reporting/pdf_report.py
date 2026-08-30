@@ -1,4 +1,4 @@
-﻿"""Reusable, lightweight PDF reporting for single fingerprint results."""
+"""Reusable, lightweight PDF reporting for single fingerprint results."""
 
 from __future__ import annotations
 
@@ -348,6 +348,45 @@ def build_comparison_report(
             ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ]))
         story.append(comp_table)
-        
+        story.append(Spacer(1, 0.5 * cm))
+
+        # Section 3: Best Algorithm Conclusion
+        def _score(m: dict) -> float:
+            return (
+                float(m.get("cii", 1.0))
+                + float(m.get("sharpness_improvement_pct", 0.0)) / 100.0
+                + float(m.get("edge_improvement_pct", 0.0)) / 100.0
+            )
+
+        if results:
+            best_overall = max(results.items(), key=lambda x: _score(x[1]["metrics"]))
+            fastest = min(results.items(), key=lambda x: x[1].get("processing_time_ms", 9999))
+            sharpest = max(
+                results.items(),
+                key=lambda x: float(x[1]["metrics"].get("sharpness_improvement_pct", 0.0)),
+            )
+
+            awards_data = [
+                ["Award", "Algorithm", "Detail"],
+                ["\U0001f947 Best Overall", best_overall[0], f"Score: {_score(best_overall[1]['metrics']):.3f}"],
+                ["\u26a1 Fastest", fastest[0], f"{fastest[1].get('processing_time_ms', 0):.1f} ms"],
+                ["\U0001f50d Sharpest", sharpest[0],
+                 f"{sharpest[1]['metrics'].get('sharpness_improvement_pct', 0.0):+.1f}%"],
+            ]
+            awards_table = Table(awards_data, colWidths=[4.0 * cm, 6.0 * cm, 6.0 * cm])
+            awards_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2B4590")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.Color(0.88, 0.97, 0.88), colors.white]),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]))
+            story.append(Paragraph("Best Algorithm Awards", styles["Heading2"]))
+            story.append(awards_table)
+
         document.build(story)
     return output.getvalue()

@@ -30,7 +30,7 @@ def rhlt_edge_guided_sharpen(
     e = edge_map.astype(np.float32) / 255.0
     enhanced = f + gain * 64.0 * polarity * e
     enhanced = np.clip(enhanced, 0, 255)
-    result = robust_rescale(enhanced, 1.0, 99.0, mask)
+    result = enhanced.astype(np.uint8)
     result[~mask] = denoised[~mask]
     return result
 

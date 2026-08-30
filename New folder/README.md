@@ -2,8 +2,8 @@
 
 This university Image Processing project provides one shared Streamlit application
 for comparing four team fingerprint-enhancement algorithms. The current working
-algorithm is RHLT Ridge Flow Restoration. The other three algorithm packages are
-owned by other team members and are intentionally not implemented here.
+algorithm is RHLT Ridge Flow Restoration. The other three team algorithm packages
+are also available through the same comparison interface.
 
 The system focuses on restoring visible ridge flow, improving low-quality fingerprint
 clarity, and isolating ridge structures for later feature analysis. It uses classical
@@ -84,24 +84,54 @@ Shared Preprocessing
         ↓
 Foreground Segmentation
         ↓
-Sobel Gradient Calculation
+Spiral-phase RHLT Convolution  (primary)
         ↓
-Local Ridge Orientation Estimation
+RHLT Edge-guided Baseline Image
         ↓
-Orientation Field Smoothing
+Sobel Ridge Orientation Estimation
         ↓
-Orientation-Adaptive Gabor Filtering
+Doubled-angle Orientation Smoothing
         ↓
-Ridge Flow Restored Image
+Local Ridge-wavelength Estimation
         ↓
-Optional Ridge Isolation
+Weak-ridge / Local-quality Mapping
+        ↓
+Orientation-and-frequency-adaptive Gabor Support  (secondary, bounded)
+        ↓
+Bounded RHLT + Gabor Fusion → Improved RHLT
+        ↓
+Quality-preservation Guard (RHLT candidates only)
+        ↓
+Binarisation → Skeleton → Minutiae
         ↓
 Dashboard / Metrics
 ```
 
-The original spiral-phase Radial Hilbert Transform implementation is retained as a
-separate diagnostic edge response and ablation experiment. The ridge-flow restoration
-output uses local orientation-adaptive Gabor filtering as required by the assignment.
+The spiral-phase Radial Hilbert Transform is the **primary enhancement foundation**.
+Gabor filtering is a **supporting component only**: it provides bounded
+orientation-guided detail to the RHLT-based baseline and cannot silently replace it.
+
+The pipeline produces three named intermediate images:
+
+| Key | Description |
+|-----|-------------|
+| `traditional_rhlt_baseline` | RHLT edge-guided sharpening; directly depends on the RHLT edge response |
+| `gabor_support` | Orientation-adaptive Gabor image; used only as bounded support |
+| `improved_rhlt` | RHLT baseline fused with Gabor support using a confidence-weighted blend |
+| `selected_output` | Which candidate was chosen: `improved_rhlt`, `traditional_rhlt_baseline`, or `original_quality_fallback` |
+
+### Traditional RHLT baseline
+
+The preprocessed image is convolved with the spiral-phase RHLT point spread function
+(Wu et al. 2024). The resulting isotropic edge magnitude is used to compute a
+fingerprint-like baseline via RHLT edge-guided sharpening:
+
+```text
+traditional_rhlt_baseline = preprocessed + gain × 64 × sign(local_contrast) × rhlt_edge_normalised
+```
+
+This image is visually interpretable as a fingerprint and is directly produced from the
+RHLT edge response. The raw RHLT edge magnitude alone is retained as a separate diagnostic.
 
 ### Foreground segmentation
 
@@ -142,21 +172,72 @@ It smooths those components and reconstructs the angle with:
 theta = 0.5 * atan2(smoothed_sin, smoothed_cos)
 ```
 
-### Orientation-adaptive Gabor filtering
+### Orientation-and-frequency-guided Gabor support
 
-Gabor filters are useful because fingerprint ridges have both a local direction and a
-repeating ridge spacing. A bank of cached Gabor kernels represents several directions
-between 0 and 180 degrees. For each valid block, the nearest kernel direction is chosen
-from the smoothed orientation field. The system does not generate a new fingerprint;
-it strengthens weak ridge evidence only where the image and neighbouring flow support
-that direction. Uniform or unreliable regions are returned safely without invented
-ridge patterns.
+Gabor filters model the spatial frequency and direction of fingerprint ridges. The
+pipeline rotates each reliable analysis block into a common ridge direction and uses
+the autocorrelation peak of its one-dimensional ridge-normal projection to estimate
+ridge wavelength. Invalid estimates are rejected explicitly and use `gabor_lambda` as
+a documented fallback. A cached two-dimensional bank covers both orientation and
+wavelength bins; no random frequency is generated.
 
-### Optional ridge isolation
+The Gabor image is used **only as bounded directional support**. It is not the final
+output. The maximum Gabor contribution per pixel is controlled by `hybrid_gabor_max_weight`
+(default 0.40), and regions with unreliable orientation (coherence below
+`minimum_orientation_coherence`) receive zero contribution.
 
-The grayscale restored result is preserved as the main output. A separate binary result
-uses Otsu thresholding and mild connected-component cleanup. Morphology is deliberately
-limited so adjacent ridges are less likely to merge.
+### Defect-aware bounded RHLT + Gabor fusion
+
+The proposed improved RHLT image is produced by confidence-weighted blending:
+
+```text
+quality(p) = clip(local_std(p) / weak_ridge_target_contrast, 0, 1)
+weakness(p) = (1 - quality(p))^clear_region_protection
+evidence(p) = rhlt_evidence_floor
+              + (1 - rhlt_evidence_floor) × rhlt_edge(p)^rhlt_edge_gamma
+weight(p) = hybrid_gabor_max_weight × weakness(p) × coherence(p)^rhlt_support_gamma × evidence(p)
+improved(p) = rhlt_baseline(p) × (1 − weight(p)) + gabor_support(p) × weight(p)
+```
+
+The RHLT evidence floor prevents weak but coherent ridge defects from receiving an
+approximately zero weight merely because their edge magnitude is weak. RHLT evidence
+still modulates the support, orientation-rejected regions receive zero weight, and the
+weight remains in `[0, hybrid_gabor_max_weight]`. Calibrated input background pixels
+outside the foreground mask remain unchanged.
+
+### Quality-preservation guard
+
+The selector evaluates both candidates primarily inside the fingerprint foreground.
+Its transparent composite score uses ridge-valley clarity, foreground contrast, edge
+clarity, structural preservation and ridge continuity, with a penalty for excessive
+new minutiae. Proposed Improved RHLT is the primary output when it is safe and its
+score is not materially below Traditional by more than the bounded
+`selector_regression_tolerance`.
+
+1. `improved_rhlt` — selected when structurally safe and within the configured
+   regression tolerance.
+2. `traditional_rhlt_baseline` — safety fallback when Improved is unsafe or
+   materially worse.
+3. `original_quality_fallback` — the original grayscale is preserved when both
+   RHLT-derived candidates seriously degrade the fingerprint.
+
+Pure Gabor output and pure detail-preserving sharpening are **never** eligible.
+The quality selection is recorded in the `selected_output` result key.
+
+### Controlled clean-reference experiment
+
+The Research Experiment tab uses only `left*.bmp`, `right*.bmp`, `special1.bmp`,
+`special2.bmp` and `spectial3.bmp` by default. Mild, Medium and Severe degradation
+presets apply deterministic Gaussian blur, contrast reduction and Gaussian noise in
+memory. The original files are never overwritten. The undegraded image is the clean
+ground truth, so the experiment reports `ssim_reference`, `psnr_reference` and
+`mse_reference` separately from structural preservation against the degraded input.
+
+The command-line equivalent is:
+
+```powershell
+python scripts/evaluate_controlled.py --seed 7
+```
 
 ## Public algorithm interface
 
@@ -225,8 +306,9 @@ python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-After dependencies are installed, `run_windows.bat` can be double-clicked. It always
-uses the Python interpreter inside the project `.venv`.
+After dependencies are installed, `run_windows.bat` can be double-clicked. It uses
+`.venv\Scripts\python.exe`, or the repository's existing
+`venv\.venv\Scripts\python.exe` layout when present.
 
 ## Running tests
 
@@ -237,8 +319,10 @@ python -m pytest -q
 ```
 
 Tests cover blank, uniform, colour, grayscale and small images; valid dimensions;
-finite orientations; segmentation masks; Gabor output; the `run_rhlt()` result contract;
-shared preprocessing; calibration; metrics; folder loading; and fault-tolerant batches.
+finite orientations; synthetic wavelength recovery; weak-ridge monotonicity; bounded
+fusion weights; adaptive Gabor selection; deterministic degradation; clean-reference
+metrics; selector margins; RHLT dependency; the `run_rhlt()` result contract; shared
+preprocessing; calibration; folder loading; and fault-tolerant batches.
 They do not depend on `algorithm_2`, `algorithm_3`, or `algorithm_4`.
 
 ## Dependencies
@@ -266,17 +350,26 @@ SciPy and scikit-image are not required. SSIM is implemented with NumPy and Open
 | `gabor_gamma` | Gabor aspect ratio | `0.5` |
 | `gabor_strength` | Conservative restoration amount | `0.75` |
 | `segmentation_min_std` | Reject smooth background blocks | `6.0` |
+| `frequency_block_size` | Window used for projection/autocorrelation | `24` |
+| `minimum_ridge_wavelength` | Smallest accepted ridge period | `3.0` |
+| `maximum_ridge_wavelength` | Largest accepted ridge period | `14.0` |
+| `weak_ridge_target_contrast` | Local standard deviation treated as clear | `45.0` |
+| `hybrid_gabor_max_weight` | Hard upper bound on Gabor contribution | `0.40` |
+| `selector_regression_tolerance` | Maximum tolerated no-reference score regression before safety fallback | `0.010` |
 
-The most useful parameters to experiment with are `block_size`, `gabor_lambda`,
-`gabor_strength`, and `orientation_smoothing_sigma`. Use the same dataset, calibration,
-preprocessing and metrics for every team algorithm comparison.
+The most useful parameters to experiment with are the accepted wavelength range,
+`weak_ridge_target_contrast`, `hybrid_gabor_max_weight` and the selector margin. Use
+the same degradation seed, dataset, preprocessing and reference metrics for comparisons.
 
 ## Assumptions and limitations
 
 - Input arrays supplied directly to the API use RGB/RGBA or grayscale ordering.
 - Automatic rotation estimation is not guessed; rotation is user-controlled.
-- Local ridge frequency estimation is optional and is not enabled because an unstable
-  estimate could harm the simpler, explainable baseline. `gabor_lambda` is configurable.
+- Local ridge frequency estimates require reliable orientation and sufficient periodic
+  evidence. Rejected blocks use the explicit `gabor_lambda` fallback.
+- The quality score is a transparent engineering proxy, not fingerprint-matching accuracy.
+- Severe degradation may destroy ridge evidence that no classical filter can reconstruct
+  without risking invented ridges.
 - No physical calibration is claimed without a real scale reference.
 - No ridge is reconstructed where the image contains too little reliable evidence.
 - No video processing is implemented anywhere in this project.

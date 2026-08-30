@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 from time import perf_counter
 
+import cv2
 import numpy as np
 
 from core.metrics import calculate_image_metrics
@@ -15,6 +16,7 @@ from core.preprocessing import (
 
 from .config import RHLTConfig
 from .core import apply_rhlt, build_rhlt_psf, psf_visualisation
+from .frequency import estimate_local_ridge_wavelength, expand_block_map
 from .metrics import metric_bundle
 from .orientation import (
     estimate_orientation_field,
@@ -31,10 +33,11 @@ from .postprocess import (
     rhlt_edge_guided_sharpen,
 )
 from .preprocess import fingerprint_foreground_mask, gaussian_denoise, percentile_normalise, to_grayscale
-from .ridge_filter import detail_preserving_sharpen, enhance_ridges_with_gabor, isolate_ridges
+from .quality import defect_aware_fusion_weight, local_ridge_quality_maps
+from .ridge_filter import enhance_ridges_with_gabor, isolate_ridges
 from .segmentation import segment_fingerprint
 
-PIPELINE_BUILD = "sigmoid-push-directional-v6"
+PIPELINE_BUILD = "rhlt-primary-quality-adaptive-v3.1"
 
 
 def _adapt_settings_to_image(
@@ -47,9 +50,6 @@ def _adapt_settings_to_image(
     if short_side >= 160:
         return settings, preprocessing
 
-    # The bundled fingerprint samples are roughly 100 px high. Applying the
-    # desktop-size filters to them merges neighbouring ridge lines. Use much
-    # tighter parameters so the Gabor filter resolves individual ridges.
     tuned_settings = replace(
         settings,
         gaussian_sigma=min(settings.gaussian_sigma, 0.25),
@@ -60,6 +60,9 @@ def _adapt_settings_to_image(
         gabor_blend_strength=max(settings.gabor_blend_strength, 80.0),
         gabor_strength=max(settings.gabor_strength, 1.5),
         min_component_area=min(settings.min_component_area, 6),
+        frequency_block_size=min(settings.frequency_block_size, 16),
+        minimum_ridge_wavelength=min(settings.minimum_ridge_wavelength, 2.5),
+        maximum_ridge_wavelength=min(settings.maximum_ridge_wavelength, 7.0),
     )
     tuned_preprocessing = replace(
         preprocessing,
@@ -71,19 +74,139 @@ def _adapt_settings_to_image(
     return tuned_settings, tuned_preprocessing
 
 
+def _orientation_only_weight(
+    foreground: np.ndarray,
+    orientation_coherence: np.ndarray,
+    valid_blocks: np.ndarray,
+    rhlt_edge: np.ndarray,
+    settings: RHLTConfig,
+) -> np.ndarray:
+    """Retain the previous orientation-only weighting for ablation."""
+    reliable = np.asarray(valid_blocks, dtype=bool) & (
+        np.asarray(orientation_coherence) >= settings.minimum_orientation_coherence
+    )
+    coherence_blocks = np.where(reliable, orientation_coherence, 0.0)
+    coherence_map = expand_block_map(coherence_blocks, settings.block_size, foreground.shape)
+    edge = np.asarray(rhlt_edge, dtype=np.float32) / 255.0
+    weight = settings.hybrid_gabor_max_weight * np.power(
+        np.clip(coherence_map, 0.0, 1.0), settings.rhlt_support_gamma
+    ) * edge
+    return np.where(
+        foreground,
+        np.clip(weight, 0.0, settings.hybrid_gabor_max_weight),
+        0.0,
+    ).astype(np.float32)
+
+
+def _fuse_rhlt_gabor(
+    rhlt_baseline: np.ndarray,
+    gabor_support: np.ndarray,
+    foreground: np.ndarray,
+    support_weight: np.ndarray,
+) -> np.ndarray:
+    """Blend bounded Gabor support into the RHLT baseline in foreground only."""
+    fg = np.asarray(foreground, dtype=bool)
+    weight = np.asarray(support_weight, dtype=np.float32)
+    if weight.shape != fg.shape:
+        raise ValueError("support_weight dimensions must match the image")
+    base_f = rhlt_baseline.astype(np.float32)
+    gabor_f = gabor_support.astype(np.float32)
+    blended = base_f * (1.0 - weight) + gabor_f * weight
+    result = rhlt_baseline.copy()
+    result[fg] = np.clip(blended[fg], 0, 255).astype(np.uint8)
+    return result
+
+
+def _structure_diagnostics(image: np.ndarray, mask: np.ndarray, settings: RHLTConfig) -> dict:
+    binary = isolate_ridges(image, mask, min_component_area=settings.min_component_area)
+    skeleton = make_skeleton(binary)
+    endings, bifurcations = crossing_number_minutiae(
+        skeleton, mask, settings.minutiae_border, settings.minutiae_min_distance
+    )
+    count, _ = cv2.connectedComponents(binary.astype(np.uint8), connectivity=8)
+    foreground_pixels = max(int(np.asarray(mask, dtype=bool).sum()), 1)
+    return {
+        "binary": binary,
+        "skeleton": skeleton,
+        "endings": endings,
+        "bifurcations": bifurcations,
+        "minutiae_total": len(endings) + len(bifurcations),
+        "components_per_10k": float(max(0, count - 1) * 10000.0 / foreground_pixels),
+    }
+
+
+def _candidate_quality_score(
+    metrics: dict,
+    structure: dict,
+    original_structure: dict,
+    settings: RHLTConfig,
+) -> tuple[float, dict[str, float | bool]]:
+    """Transparent foreground-first score with fragmentation/noise penalties."""
+    def bounded_ratio(processed_key: str, original_key: str) -> float:
+        ratio = float(metrics[processed_key]) / max(float(metrics[original_key]), 1e-6)
+        return float(np.clip(ratio, 0.0, 1.25) / 1.25)
+
+    contrast = bounded_ratio("foreground_processed_contrast", "foreground_original_contrast")
+    ridge_valley = bounded_ratio(
+        "processed_ridge_valley_clarity", "original_ridge_valley_clarity"
+    )
+    edge = bounded_ratio(
+        "foreground_processed_edge_clarity", "foreground_original_edge_clarity"
+    )
+    structural = float(np.clip(metrics.get("foreground_ssim", metrics.get("ssim", 0.0)), 0.0, 1.0))
+    continuity = float(1.0 / (1.0 + structure["components_per_10k"]))
+    original_minutiae = max(int(original_structure["minutiae_total"]), 1)
+    excess = max(0.0, (structure["minutiae_total"] - original_minutiae) / original_minutiae)
+    minutiae_penalty = float(np.clip(excess, 0.0, 1.0))
+    score = (
+        0.20 * contrast
+        + 0.25 * ridge_valley
+        + 0.20 * edge
+        + 0.25 * structural
+        + 0.10 * continuity
+        - 0.10 * minutiae_penalty
+    )
+    safe = bool(
+        structural >= settings.selector_ssim_floor
+        and float(metrics["foreground_processed_edge_clarity"])
+        >= 0.75 * float(metrics["foreground_original_edge_clarity"])
+        and float(metrics["foreground_processed_contrast"])
+        >= 0.65 * float(metrics["foreground_original_contrast"])
+    )
+    return float(score), {
+        "contrast": contrast,
+        "ridge_valley_clarity": ridge_valley,
+        "edge_clarity": edge,
+        "structural_preservation": structural,
+        "ridge_continuity": continuity,
+        "excess_minutiae_penalty": minutiae_penalty,
+        "safe": safe,
+    }
+
+
 def run_rhlt(
     image: np.ndarray,
     config: RHLTConfig | None = None,
     *,
     preprocessed_image: np.ndarray | None = None,
     preprocessing_config: PreprocessingConfig | None = None,
+    reference_image: np.ndarray | None = None,
 ) -> dict:
     """
-    Restore fingerprint ridge flow using shared preprocessing and local orientation.
+    Restore fingerprint ridge flow with RHLT as the primary enhancement foundation.
 
-    When preprocessed_image is supplied by the central app, preprocessing is not
-    repeated. The legacy spiral-phase RHLT edge response is retained as a separate
-    diagnostic output; orientation-adaptive Gabor filtering performs ridge restoration.
+    Data flow:
+        Calibrated image
+        → shared preprocessing
+        → foreground segmentation
+        → spiral-phase RHLT convolution  (primary)
+        → RHLT edge-guided baseline image
+        → ridge orientation estimation
+        → doubled-angle orientation smoothing
+        → orientation-adaptive Gabor support  (secondary)
+        → bounded RHLT+Gabor fusion → improved RHLT
+        → quality-preservation guard (RHLT candidates only)
+        → binarisation → skeleton → minutiae → metrics
     """
     settings = config or RHLTConfig()
     started = perf_counter()
@@ -97,6 +220,7 @@ def run_rhlt(
     settings.validate()
     shared_config.validate()
 
+    # ── Shared preprocessing ──────────────────────────────────────────────────
     if preprocessed_image is None:
         preprocessing_stages = preprocess_with_stages(original, shared_config)
         preprocessed = preprocessing_stages["enhanced"]
@@ -111,14 +235,48 @@ def run_rhlt(
             "enhanced": preprocessed,
         }
 
+    original_gray = shared_to_grayscale(original)
+
+    # ── Foreground segmentation ───────────────────────────────────────────────
     foreground_mask, segmentation_blocks = segment_fingerprint(
         preprocessed,
         block_size=settings.block_size,
         min_block_std=settings.segmentation_min_std,
         threshold_scale=settings.segmentation_threshold_scale,
     )
+
+    # ── Spiral-phase RHLT convolution (primary) ───────────────────────────────
+    psf = build_rhlt_psf(
+        size=settings.psf_size,
+        topological_charge=settings.topological_charge,
+        aperture_ratio=settings.aperture_ratio,
+        apodisation=settings.apodisation,
+    )
+    if min(preprocessed.shape) < 2:
+        complex_response = np.zeros(preprocessed.shape, dtype=np.complex128)
+        rhlt_edge = np.zeros(preprocessed.shape, dtype=np.uint8)
+    else:
+        complex_response, rhlt_edge = apply_rhlt(preprocessed, psf, foreground_mask)
+
+    rhlt_stretched = linear_grayscale_stretch(
+        rhlt_edge,
+        foreground_mask,
+        settings.stretch_low_percentile,
+        settings.stretch_high_percentile,
+    )
+
+    # ── Traditional RHLT baseline (RHLT-dependent) ────────────────────────────
+    # rhlt_edge_guided_sharpen fuses the denoised image with RHLT edge magnitude,
+    # producing a visually interpretable fingerprint that depends on the RHLT response.
+    traditional_rhlt_baseline = rhlt_edge_guided_sharpen(
+        preprocessed, rhlt_stretched, foreground_mask, settings.edge_gain
+    )
+    # Enhancement is foreground-only; calibrated input background is preserved.
+    traditional_rhlt_baseline[~foreground_mask] = original_gray[~foreground_mask]
+
+    # ── Ridge orientation estimation ──────────────────────────────────────────
     raw_orientation, valid_orientation_blocks, orientation_coherence = estimate_orientation_field(
-        preprocessed,
+        preprocessing_stages["denoised"],
         foreground_mask,
         block_size=settings.block_size,
     )
@@ -133,99 +291,175 @@ def run_rhlt(
         valid_orientation_blocks,
         block_size=settings.block_size,
     )
-    warnings: list[str] = []
-    ridge_candidate = enhance_ridges_with_gabor(
-        preprocessed,
-        orientation_field,
-        foreground_mask,
-        settings,
-        valid_blocks=valid_orientation_blocks,
-        base_image=original,
+
+    # ── Orientation-adaptive Gabor support (secondary) ────────────────────────
+    # Gabor is used only as bounded directional support; it is never the final output.
+    local_wavelength_field, frequency_valid_blocks, frequency_confidence = (
+        estimate_local_ridge_wavelength(
+            preprocessing_stages["denoised"],
+            orientation_field,
+            valid_orientation_blocks,
+            foreground_mask,
+            orientation_block_size=settings.block_size,
+            analysis_block_size=settings.frequency_block_size,
+            minimum_wavelength=settings.minimum_ridge_wavelength,
+            maximum_wavelength=settings.maximum_ridge_wavelength,
+            smoothing_size=settings.frequency_smoothing_size,
+            fallback_wavelength=settings.gabor_lambda,
+        )
     )
-    original_gray = shared_to_grayscale(original)
-    detail_candidate = detail_preserving_sharpen(original_gray, foreground_mask)
-    candidates = [ridge_candidate, detail_candidate]
-    baseline = calculate_image_metrics(original_gray, original_gray)
+    wavelength_pixels = expand_block_map(
+        local_wavelength_field, settings.block_size, foreground_mask.shape
+    ).astype(np.float32)
+    frequency_valid_pixels = expand_block_map(
+        frequency_valid_blocks, settings.block_size, foreground_mask.shape
+    ).astype(bool)
+    local_frequency_map = np.zeros(foreground_mask.shape, dtype=np.float32)
+    local_frequency_map[frequency_valid_pixels] = 1.0 / np.maximum(
+        wavelength_pixels[frequency_valid_pixels], 1e-6
+    )
+    local_quality_map, weak_ridge_map, local_contrast_map = local_ridge_quality_maps(
+        preprocessing_stages["denoised"],
+        foreground_mask,
+        sigma=settings.local_quality_sigma,
+        target_contrast=settings.weak_ridge_target_contrast,
+        clear_region_protection=settings.clear_region_protection,
+    )
 
-    def candidate_score(candidate: np.ndarray) -> tuple[float, dict]:
-        candidate_metrics = calculate_image_metrics(original_gray, candidate)
-        contrast_ratio = candidate_metrics["processed_contrast"] / max(
-            baseline["original_contrast"], 1e-6
+    warnings: list[str] = []
+    if np.any(valid_orientation_blocks):
+        gabor_support = enhance_ridges_with_gabor(
+            preprocessed,
+            orientation_field,
+            foreground_mask,
+            settings,
+            valid_blocks=valid_orientation_blocks,
+            base_image=original,
+            wavelength_field=local_wavelength_field,
+            frequency_valid_blocks=frequency_valid_blocks,
         )
-        sharpness_ratio = candidate_metrics["processed_sharpness"] / max(
-            baseline["original_sharpness"], 1e-6
+    else:
+        gabor_support = traditional_rhlt_baseline.copy()
+        warnings.append(
+            "No reliable orientation blocks found; Gabor support was not applied."
         )
-        edge_ratio = candidate_metrics["processed_edge_clarity"] / max(
-            baseline["original_edge_clarity"], 1e-6
-        )
-        ssim_value = candidate_metrics.get("ssim")
-        ssim_is_acceptable = ssim_value is None or ssim_value >= 0.80
-        preserves_quality = (
-            contrast_ratio >= 0.90
-            and sharpness_ratio >= 0.90
-            and edge_ratio >= 0.90
-            and ssim_is_acceptable
-        )
-        if not preserves_quality:
-            return 0.0, candidate_metrics
-        score = (
-            0.20 * min(contrast_ratio, 1.5)
-            + 0.40 * min(sharpness_ratio, 1.5)
-            + 0.40 * min(edge_ratio, 1.5)
-        )
-        return float(score), candidate_metrics
 
-    scored_candidates = [(candidate_score(candidate)[0], candidate) for candidate in candidates]
-    best_score, best_candidate = max(scored_candidates, key=lambda item: item[0])
-    if best_score > 0.98:
-        ridge_restored = best_candidate
+    # ── Bounded RHLT+Gabor fusion → Improved RHLT ────────────────────────────
+    if settings.use_quality_adaptive_fusion:
+        fusion_weight_map = defect_aware_fusion_weight(
+            weak_ridge_map,
+            foreground_mask,
+            orientation_coherence,
+            valid_orientation_blocks,
+            rhlt_stretched,
+            settings,
+        )
+    else:
+        fusion_weight_map = _orientation_only_weight(
+            foreground_mask,
+            orientation_coherence,
+            valid_orientation_blocks,
+            rhlt_stretched,
+            settings,
+        )
+    improved_rhlt = _fuse_rhlt_gabor(
+        traditional_rhlt_baseline, gabor_support, foreground_mask, fusion_weight_map
+    )
+
+    # ── Quality-preservation guard (RHLT candidates only) ─────────────────────
+    # Only traditional_rhlt_baseline and improved_rhlt are eligible.
+    # Pure Gabor and pure detail-sharpening are NOT eligible.
+    clean_reference = None if reference_image is None else shared_to_grayscale(reference_image)
+    baseline_metrics = calculate_image_metrics(
+        original_gray,
+        traditional_rhlt_baseline,
+        reference=clean_reference,
+        foreground_mask=foreground_mask,
+    )
+    improved_metrics = calculate_image_metrics(
+        original_gray,
+        improved_rhlt,
+        reference=clean_reference,
+        foreground_mask=foreground_mask,
+    )
+
+    original_structure = _structure_diagnostics(original_gray, foreground_mask, settings)
+    baseline_structure = _structure_diagnostics(
+        traditional_rhlt_baseline, foreground_mask, settings
+    )
+    improved_structure = _structure_diagnostics(improved_rhlt, foreground_mask, settings)
+    traditional_quality_score, traditional_components = _candidate_quality_score(
+        baseline_metrics, baseline_structure, original_structure, settings
+    )
+    improved_quality_score, improved_components = _candidate_quality_score(
+        improved_metrics, improved_structure, original_structure, settings
+    )
+
+    # getattr keeps a long-running Streamlit session compatible with a config
+    # object constructed before selector_regression_tolerance was introduced.
+    regression_tolerance = float(
+        getattr(settings, "selector_regression_tolerance", 0.010)
+    )
+    if not np.any(foreground_mask):
+        ridge_restored = original_gray
+        selected_output = "original_quality_fallback"
+        selected_structure = original_structure
+        selection_reason = "No reliable fingerprint foreground was available for enhancement."
+    elif bool(improved_components["safe"]) and (
+        not bool(traditional_components["safe"])
+        or improved_quality_score >= traditional_quality_score - regression_tolerance
+    ):
+        ridge_restored = improved_rhlt
+        selected_output = "improved_rhlt"
+        selected_structure = improved_structure
+        score_delta = improved_quality_score - traditional_quality_score
+        selection_reason = (
+            "Proposed Improved RHLT was selected as the primary method: it passed "
+            f"all structural safety checks and its score difference was {score_delta:+.4f} "
+            f"(allowed regression tolerance {regression_tolerance:.4f})."
+        )
+    elif bool(traditional_components["safe"]):
+        ridge_restored = traditional_rhlt_baseline
+        selected_output = "traditional_rhlt_baseline"
+        selected_structure = baseline_structure
+        selection_reason = (
+            "Safety fallback to Traditional RHLT: Proposed Improved RHLT either failed "
+            "a structural safety check or scored materially below Traditional RHLT "
+            f"by more than {regression_tolerance:.4f}."
+        )
     else:
         ridge_restored = original_gray
-        warnings.append(
-            "No enhancement candidate improved the measurable ridge detail; "
-            "the already-sharp original was preserved."
+        selected_output = "original_quality_fallback"
+        selected_structure = original_structure
+        selection_reason = (
+            "Neither RHLT candidate satisfied the foreground structural and quality safety bounds."
         )
-    ridge_binary = isolate_ridges(
-        ridge_restored,
-        foreground_mask,
-        min_component_area=settings.min_component_area,
-    )
+    if selected_output != "improved_rhlt":
+        warnings.append(selection_reason)
 
-    # Keep the original spiral-phase RHLT result as an explainable diagnostic.
-    psf = build_rhlt_psf(
-        size=settings.psf_size,
-        topological_charge=settings.topological_charge,
-        aperture_ratio=settings.aperture_ratio,
-        apodisation=settings.apodisation,
-    )
-    if min(preprocessed.shape) < 2:
-        complex_response = np.zeros(preprocessed.shape, dtype=np.complex128)
-        rhlt_edge = np.zeros(preprocessed.shape, dtype=np.uint8)
-    else:
-        complex_response, rhlt_edge = apply_rhlt(preprocessed, psf, foreground_mask)
-    rhlt_stretched = linear_grayscale_stretch(
-        rhlt_edge,
-        foreground_mask,
-        settings.stretch_low_percentile,
-        settings.stretch_high_percentile,
-    )
-
-    skeleton = make_skeleton(ridge_binary)
-    endings, bifurcations = crossing_number_minutiae(
-        skeleton,
-        foreground_mask,
-        settings.minutiae_border,
-        settings.minutiae_min_distance,
-    )
+    # ── Post-processing ───────────────────────────────────────────────────────
+    ridge_binary = selected_structure["binary"]
+    skeleton = selected_structure["skeleton"]
+    endings = selected_structure["endings"]
+    bifurcations = selected_structure["bifurcations"]
     overlay = minutiae_overlay(ridge_restored, endings, bifurcations)
 
+    # ── Warnings ─────────────────────────────────────────────────────────────
     if not np.any(foreground_mask):
-        warnings.append("Too little ridge variation was found; no foreground was enhanced.")
+        warnings.append("Too little ridge variation found; no foreground was segmented.")
     elif not np.any(valid_orientation_blocks):
-        warnings.append("Foreground was found, but ridge orientation was not reliable enough for Gabor enhancement.")
+        warnings.append(
+            "Foreground found but ridge orientation was not reliable enough for Gabor support."
+        )
 
+    # ── Final metrics ─────────────────────────────────────────────────────────
     elapsed_ms = (perf_counter() - started) * 1000.0
-    metrics = calculate_image_metrics(original, ridge_restored, foreground_mask=foreground_mask)
+    metrics = calculate_image_metrics(
+        original,
+        ridge_restored,
+        reference=clean_reference,
+        foreground_mask=foreground_mask,
+    )
     metrics.update(
         metric_bundle(
             ridge_restored,
@@ -237,26 +471,47 @@ def run_rhlt(
     )
     metrics["foreground_coverage_percent"] = float(foreground_mask.mean() * 100.0)
     metrics["valid_orientation_blocks"] = int(valid_orientation_blocks.sum())
-    # Mean coherence over valid blocks: 0 = chaotic, 1 = perfectly parallel ridges.
     if np.any(valid_orientation_blocks):
         metrics["mean_orientation_coherence"] = float(
             orientation_coherence[valid_orientation_blocks].mean()
         )
     else:
         metrics["mean_orientation_coherence"] = 0.0
+    foreground_weights = fusion_weight_map[foreground_mask]
+    mean_fusion_weight = float(np.mean(foreground_weights)) if foreground_weights.size else 0.0
+    maximum_fusion_weight = float(np.max(foreground_weights)) if foreground_weights.size else 0.0
+    enhanced_foreground_percent = (
+        float(np.mean(foreground_weights > 0.01 * max(settings.hybrid_gabor_max_weight, 1e-6)) * 100.0)
+        if foreground_weights.size
+        else 0.0
+    )
+    valid_frequency_blocks = int(frequency_valid_blocks.sum())
+    metrics.update(
+        {
+            "mean_fusion_weight": mean_fusion_weight,
+            "maximum_fusion_weight": maximum_fusion_weight,
+            "enhanced_foreground_percent": enhanced_foreground_percent,
+            "valid_frequency_blocks": valid_frequency_blocks,
+            "traditional_quality_score": traditional_quality_score,
+            "improved_quality_score": improved_quality_score,
+        }
+    )
 
     return {
+        # ── Identity ─────────────────────────────────────────────────────────
         "pipeline_build": PIPELINE_BUILD,
         "algorithm_name": "RHLT Ridge Flow Restoration",
         "status": "warning" if warnings else "ok",
         "warnings": warnings,
         "config": asdict(settings),
+        # ── Input / preprocessing ─────────────────────────────────────────────
         "original": original,
         "grayscale": preprocessing_stages["grayscale"],
         "preprocessing_stages": preprocessing_stages,
         "preprocessed": preprocessed,
         "normalised": preprocessing_stages["normalised"],
         "denoised": preprocessing_stages["denoised"],
+        # ── Segmentation / orientation ────────────────────────────────────────
         "foreground_mask": foreground_mask,
         "mask": foreground_mask,
         "segmentation_blocks": segmentation_blocks,
@@ -265,6 +520,40 @@ def run_rhlt(
         "orientation_block_mask": valid_orientation_blocks,
         "orientation_coherence": orientation_coherence,
         "orientation_visualisation": orientation_visualisation,
+        "local_wavelength_field": local_wavelength_field,
+        "local_frequency_map": local_frequency_map,
+        "frequency_valid_blocks": frequency_valid_blocks,
+        "frequency_confidence": frequency_confidence,
+        # ── RHLT diagnostic outputs ───────────────────────────────────────────
+        "psf": psf,
+        "psf_visualisation": psf_visualisation(psf),
+        "complex_response": complex_response,
+        "rhlt_raw": rhlt_edge,
+        "rhlt_stretched": rhlt_stretched,
+        # ── Algorithm stages (new) ────────────────────────────────────────────
+        "traditional_rhlt_baseline": traditional_rhlt_baseline,
+        "gabor_support": gabor_support,
+        "improved_rhlt": improved_rhlt,
+        "local_quality_map": local_quality_map,
+        "weak_ridge_map": weak_ridge_map,
+        "local_contrast_map": local_contrast_map,
+        "fusion_weight_map": fusion_weight_map,
+        "selected_output": selected_output,
+        "selection_reason": selection_reason,
+        "traditional_quality_score": traditional_quality_score,
+        "improved_quality_score": improved_quality_score,
+        "quality_score_components": {
+            "traditional_rhlt": traditional_components,
+            "improved_rhlt": improved_components,
+        },
+        "mean_fusion_weight": mean_fusion_weight,
+        "maximum_fusion_weight": maximum_fusion_weight,
+        "enhanced_foreground_percent": enhanced_foreground_percent,
+        "valid_frequency_blocks": valid_frequency_blocks,
+        # ── Per-candidate metrics (new) ───────────────────────────────────────
+        "traditional_rhlt_metrics": baseline_metrics,
+        "improved_rhlt_metrics": improved_metrics,
+        # ── Final selected output (backward-compatible keys) ──────────────────
         "ridge_restored": ridge_restored,
         "enhanced_image": ridge_restored,
         "ridge_enhanced": ridge_restored,
@@ -274,11 +563,6 @@ def run_rhlt(
         "endings": endings,
         "bifurcations": bifurcations,
         "minutiae_overlay": overlay,
-        "psf": psf,
-        "psf_visualisation": psf_visualisation(psf),
-        "complex_response": complex_response,
-        "rhlt_raw": rhlt_edge,
-        "rhlt_stretched": rhlt_stretched,
         "metrics": metrics,
         "processing_time_ms": float(elapsed_ms),
     }
@@ -293,7 +577,7 @@ def process_fingerprint(image: np.ndarray, config: RHLTConfig) -> dict:
     grayscale = to_grayscale(original)
     normalised = percentile_normalise(grayscale, 1.0, 99.0)
     denoised = gaussian_denoise(normalised, config.gaussian_sigma)
-    mask = fingerprint_foreground_mask(denoised, config.segmentation_sigma)
+    mask = fingerprint_foreground_mask(denoised, config.block_size)
 
     psf = build_rhlt_psf(
         size=config.psf_size,
@@ -309,8 +593,6 @@ def process_fingerprint(image: np.ndarray, config: RHLTConfig) -> dict:
         config.stretch_high_percentile,
     )
 
-    # Optional project enhancement: preserve a ridge-like grey image while using RHLT
-    # edges to strengthen local ridge/valley separation.
     ridge_enhanced = rhlt_edge_guided_sharpen(denoised, rhlt_stretched, mask, config.edge_gain)
 
     binary = binarise_dark_ridges(ridge_enhanced, mask)
@@ -357,20 +639,49 @@ def process_fingerprint(image: np.ndarray, config: RHLTConfig) -> dict:
 
 def run_ablation(image: np.ndarray, base: RHLTConfig) -> list[dict]:
     """
-    Small parameter study for Mode A experimental evaluation.
+    Parameter study comparing RHLT variants.
 
-    Baseline uses no apodisation. Windowed variants test sidelobe suppression, which is
-    motivated by the relief/sidelobe limitation reported for RHLT fingerprint filtering.
+    Variants separate apodisation, orientation-only support and the proposed
+    quality-and-frequency-adaptive method. Candidate metrics are reported
+    directly, rather than metrics from a possible selector fallback.
     """
-    settings = [
-        ("Baseline RHLT", 0.00, base.psf_size),
-        ("Windowed RHLT (mild)", 0.25, base.psf_size),
-        ("Windowed RHLT (strong)", 0.50, base.psf_size),
-        ("Larger PSF", base.apodisation, min(129, base.psf_size + 32 if (base.psf_size + 32) % 2 == 1 else base.psf_size + 33)),
+    base_no_apo = replace(base, apodisation=0.00, hybrid_gabor_max_weight=0.0)
+    windowed = replace(base, apodisation=0.25, hybrid_gabor_max_weight=0.0)
+    orientation_only = replace(
+        base, apodisation=0.00, use_local_frequency=False,
+        use_quality_adaptive_fusion=False,
+    )
+    proposed = replace(
+        base, apodisation=0.00, use_local_frequency=True,
+        use_quality_adaptive_fusion=True,
+    )
+
+    variants = [
+        ("Traditional RHLT baseline", base_no_apo, "traditional"),
+        ("RHLT with apodisation", windowed, "traditional"),
+        ("RHLT + orientation-only Gabor support", orientation_only, "improved"),
+        ("Proposed quality/frequency-adaptive RHLT", proposed, "improved"),
     ]
     rows = []
-    for label, apo, size in settings:
-        cfg = RHLTConfig(**{**asdict(base), "apodisation": apo, "psf_size": size})
-        result = process_fingerprint(image, cfg)
-        rows.append({"variant": label, "apodisation": apo, "psf_size": size, **result["metrics"]})
+    for label, cfg, candidate in variants:
+        result = run_rhlt(image, cfg)
+        m = (
+            result["traditional_rhlt_metrics"]
+            if candidate == "traditional"
+            else result["improved_rhlt_metrics"]
+        )
+        rows.append({
+            "variant": label,
+            "apodisation": cfg.apodisation,
+            "hybrid_gabor_max_weight": cfg.hybrid_gabor_max_weight,
+            "local_frequency": cfg.use_local_frequency,
+            "quality_adaptive": cfg.use_quality_adaptive_fusion,
+            "selected_output": result["selected_output"],
+            "candidate_quality_score": (
+                result["traditional_quality_score"]
+                if candidate == "traditional"
+                else result["improved_quality_score"]
+            ),
+            **m,
+        })
     return rows

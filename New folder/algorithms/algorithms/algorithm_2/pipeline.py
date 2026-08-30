@@ -50,6 +50,13 @@ def _gabor_enhance(
     gamma: float = 0.5,
 ) -> np.ndarray:
     """Apply a bank of Gabor filters steered by the local orientation field."""
+    # Adapt parameters for small images to avoid over-blurring
+    short_side = min(gray.shape[:2])
+    if short_side < 160:
+        kernel_size = min(kernel_size, 7)
+        sigma = min(sigma, 1.5)
+        wavelength = min(wavelength, 5.0)
+
     # Build the kernel bank
     kernels = []
     for i in range(num_orientations):
@@ -147,7 +154,7 @@ def run_algorithm(
 
     # Post-processing: binarise, skeleton, minutiae
     ridge_binary = binarise_dark_ridges(enhanced, foreground_mask)
-    ridge_binary = clean_binary(ridge_binary, min_area=10)
+    ridge_binary = clean_binary(ridge_binary, min_component_area=10)
     skeleton = make_skeleton(ridge_binary)
     endings, bifurcations = crossing_number_minutiae(skeleton, foreground_mask, border=10, min_distance=8)
     overlay = minutiae_overlay(enhanced, endings, bifurcations)

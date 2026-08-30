@@ -44,6 +44,34 @@ def _gabor_kernel_bank(
     return tuple(kernels)
 
 
+@lru_cache(maxsize=32)
+def _adaptive_gabor_kernel_bank(
+    orientation_bins: int,
+    kernel_size: int,
+    sigma: float,
+    wavelengths: tuple[float, ...],
+    gamma: float,
+    phase: float,
+) -> tuple[tuple[np.ndarray, ...], ...]:
+    """Cache a two-dimensional orientation/wavelength Gabor bank."""
+    rows: list[tuple[np.ndarray, ...]] = []
+    for orientation_index in range(orientation_bins):
+        ridge_angle = orientation_index * np.pi / orientation_bins
+        kernels: list[np.ndarray] = []
+        for wavelength in wavelengths:
+            kernel = cv2.getGaborKernel(
+                (kernel_size, kernel_size), sigma, ridge_angle + np.pi / 2.0,
+                wavelength, gamma, phase, ktype=cv2.CV_32F,
+            )
+            kernel -= float(kernel.mean())
+            normaliser = float(np.sum(np.abs(kernel)))
+            if normaliser > 1e-12:
+                kernel /= normaliser
+            kernels.append(kernel)
+        rows.append(tuple(kernels))
+    return tuple(rows)
+
+
 def _block_orientation_bins(
     orientation: np.ndarray,
     valid_blocks: np.ndarray,
@@ -61,8 +89,10 @@ def enhance_ridges_with_gabor(
     config: RHLTConfig,
     valid_blocks: np.ndarray | None = None,
     base_image: np.ndarray | None = None,
+    wavelength_field: np.ndarray | None = None,
+    frequency_valid_blocks: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Restore ridge evidence while retaining detail from an unblurred base image."""
+    """Create bounded orientation-and-frequency-adaptive Gabor ridge support."""
     gray = to_grayscale(image)
     base = gray if base_image is None else to_grayscale(base_image)
     if base.shape != gray.shape:
@@ -87,20 +117,42 @@ def enhance_ridges_with_gabor(
         block_mask = np.asarray(valid_blocks, dtype=bool)
     if angles.shape != block_mask.shape:
         raise ValueError("orientation and valid_blocks must have equal dimensions")
+    if wavelength_field is None:
+        block_wavelength = np.full(angles.shape, config.gabor_lambda, dtype=np.float32)
+        frequency_valid = np.zeros(angles.shape, dtype=bool)
+    else:
+        block_wavelength = np.asarray(wavelength_field, dtype=np.float32)
+        if block_wavelength.shape != angles.shape:
+            raise ValueError("wavelength_field must match the orientation field")
+        frequency_valid = (
+            np.ones(angles.shape, dtype=bool)
+            if frequency_valid_blocks is None
+            else np.asarray(frequency_valid_blocks, dtype=bool)
+        )
+        if frequency_valid.shape != angles.shape:
+            raise ValueError("frequency_valid_blocks must match the orientation field")
     if not np.any(foreground) or not np.any(block_mask):
         return base.copy()
 
-    kernels = _gabor_kernel_bank(
+    wavelength_values = tuple(
+        float(value) for value in np.linspace(
+            config.minimum_ridge_wavelength,
+            config.maximum_ridge_wavelength,
+            config.frequency_bins,
+        )
+    )
+    kernels = _adaptive_gabor_kernel_bank(
         config.orientation_bins,
         config.gabor_kernel_size,
         config.gabor_sigma,
-        config.gabor_lambda,
+        wavelength_values,
         config.gabor_gamma,
         config.gabor_psi,
     )
     block_bins = _block_orientation_bins(angles, block_mask, config.orientation_bins)
     height, width = gray.shape
-    pixel_bins = np.full(gray.shape, -1, dtype=np.int16)
+    pixel_orientation_bins = np.full(gray.shape, -1, dtype=np.int16)
+    pixel_wavelength_bins = np.full(gray.shape, -1, dtype=np.int16)
     for block_y in range(block_bins.shape[0]):
         y_start = block_y * config.block_size
         y_end = min(height, y_start + config.block_size)
@@ -108,9 +160,16 @@ def enhance_ridges_with_gabor(
             selected_bin = int(block_bins[block_y, block_x])
             if selected_bin < 0:
                 continue
+            wavelength = (
+                float(block_wavelength[block_y, block_x])
+                if config.use_local_frequency and frequency_valid[block_y, block_x]
+                else float(config.gabor_lambda)
+            )
+            wavelength_index = int(np.argmin(np.abs(np.asarray(wavelength_values) - wavelength)))
             x_start = block_x * config.block_size
             x_end = min(width, x_start + config.block_size)
-            pixel_bins[y_start:y_end, x_start:x_end] = selected_bin
+            pixel_orientation_bins[y_start:y_end, x_start:x_end] = selected_bin
+            pixel_wavelength_bins[y_start:y_end, x_start:x_end] = wavelength_index
 
     analysis_image = gray.astype(np.float32)
     base_float = base.astype(np.float32)
@@ -118,7 +177,11 @@ def enhance_ridges_with_gabor(
     # the subtraction does not over-blur small fingerprint images.
     short_side = min(gray.shape[:2])
     max_local_sigma = max(0.8, short_side / 40.0)
-    local_sigma = min(max(1.0, config.gabor_lambda / 2.0), max_local_sigma)
+    valid_wavelengths = block_wavelength[frequency_valid]
+    representative_wavelength = (
+        float(np.median(valid_wavelengths)) if valid_wavelengths.size else config.gabor_lambda
+    )
+    local_sigma = min(max(1.0, representative_wavelength / 2.0), max_local_sigma)
     local_mean = cv2.GaussianBlur(
         analysis_image,
         (0, 0),
@@ -128,12 +191,17 @@ def enhance_ridges_with_gabor(
     )
     centred = analysis_image - local_mean
     selected_response = np.zeros_like(analysis_image)
-    for index, kernel in enumerate(kernels):
-        selected_pixels = (pixel_bins == index) & foreground
-        if not np.any(selected_pixels):
-            continue
-        response = cv2.filter2D(centred, cv2.CV_32F, kernel, borderType=cv2.BORDER_REFLECT)
-        selected_response[selected_pixels] = response[selected_pixels]
+    for orientation_index, wavelength_kernels in enumerate(kernels):
+        for wavelength_index, kernel in enumerate(wavelength_kernels):
+            selected_pixels = (
+                (pixel_orientation_bins == orientation_index)
+                & (pixel_wavelength_bins == wavelength_index)
+                & foreground
+            )
+            if not np.any(selected_pixels):
+                continue
+            response = cv2.filter2D(centred, cv2.CV_32F, kernel, borderType=cv2.BORDER_REFLECT)
+            selected_response[selected_pixels] = response[selected_pixels]
 
     values = np.abs(selected_response[foreground])
     # Use p95 (not p99) so the ridge_delta values are larger and more impactful.
@@ -142,13 +210,13 @@ def enhance_ridges_with_gabor(
         return base.copy()
     ridge_delta = np.clip(selected_response / response_scale, -1.0, 1.0)
 
-    # ---- Three-stage aggressive enhancement ----
-    # Stage 1: Strong unsharp mask for edge/ridge sharpening.
+    # ---- Conservative support construction ----
+    # Stage 1: mild unsharp masking; the final fusion applies a separate bound.
     usm_sigma = min(0.5, max(0.3, short_side / 300.0))
     usm_blur = cv2.GaussianBlur(
         base_float, (0, 0), sigmaX=usm_sigma, sigmaY=usm_sigma, borderType=cv2.BORDER_REFLECT
     )
-    usm_amount = getattr(config, 'gabor_strength', 1.2) * 2.5
+    usm_amount = config.gabor_strength * 1.2
     sharpened = np.clip(base_float + usm_amount * (base_float - usm_blur), 0.0, 255.0)
 
     # Stage 2: Directional sigmoid push based on Gabor orientation response.
@@ -156,17 +224,17 @@ def enhance_ridges_with_gabor(
     # ridge_delta > 0  =>  valley pixel (push toward white=255)
     target = np.where(ridge_delta < 0, 0.0, 255.0)
     push_weight = np.abs(ridge_delta)  # confidence in direction (0..1)
-    blend = getattr(config, 'gabor_blend_strength', 48.0)
+    blend = config.gabor_blend_strength
     # Normalise blend to a 0..1 gain that scales the directional push.
-    push_gain = min(1.0, blend / 100.0)
+    push_gain = min(0.65, blend / 140.0)
     pushed = sharpened + push_gain * push_weight * (target - sharpened)
     pushed = np.clip(pushed, 0.0, 255.0)
 
     # Stage 3: Per-foreground contrast stretch so the full 0-255 range is used.
     fg_vals = pushed[foreground]
-    p2, p98 = float(np.percentile(fg_vals, 2.0)), float(np.percentile(fg_vals, 98.0))
-    if p98 > p2 + 1.0:
-        stretched = (pushed - p2) / (p98 - p2) * 255.0
+    p1, p99 = float(np.percentile(fg_vals, 1.0)), float(np.percentile(fg_vals, 99.0))
+    if p99 > p1 + 1.0:
+        stretched = (pushed - p1) / (p99 - p1) * 255.0
         pushed = np.clip(stretched, 0.0, 255.0)
 
     output = pushed.astype(np.uint8)

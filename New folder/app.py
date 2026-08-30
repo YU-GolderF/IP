@@ -484,7 +484,7 @@ with tabs[0]:
 
         polynomial_column.image(
             selected["polynomial_unsharp"],
-            caption="Enhancement 2: Nonlinear Polynomial UM",
+            caption="Final Selected: Nonlinear Polynomial UM",
             clamp=True,
             use_container_width=True,
         )
@@ -550,6 +550,183 @@ with tabs[0]:
             hide_index=True,
         )
 
+        # Batch-average comparison across all processed fingerprints.
+        batch_candidate_rows = []
+
+        for record in records:
+            result = record["result"]
+
+            batch_candidate_rows.append(
+                {
+                    "Method": "Preprocessed Input (Before UM)",
+                    "CII": 1.0,
+                    "Sharpness Improvement (%)": 0.0,
+                    "RVC Improvement (%)": 0.0,
+                    "Edge Improvement (%)": 0.0,
+                    "SSIM": 1.0,
+                    "Detected Minutiae": int(result.get("original_minutiae", 0)),
+                    "Processing Time (ms)": np.nan,
+                }
+            )
+
+            candidates = [
+                (
+                    "Conventional UM",
+                    result["conventional_unsharp_metrics"],
+                    result.get("conventional_unsharp_minutiae", 0),
+                    result.get("conventional_unsharp_time_ms", 0.0),
+                ),
+                (
+                    "Adaptive UM",
+                    result["adaptive_unsharp_metrics"],
+                    result.get("adaptive_unsharp_minutiae", 0),
+                    result.get("adaptive_unsharp_time_ms", 0.0),
+                ),
+                (
+                    "Polynomial UM",
+                    result["polynomial_unsharp_metrics"],
+                    result.get("polynomial_unsharp_minutiae", 0),
+                    result.get("polynomial_unsharp_time_ms", 0.0),
+                ),
+            ]
+
+            for method, candidate_metrics, minutiae, time_ms in candidates:
+                original_rvc = max(
+                    float(
+                        candidate_metrics.get(
+                            "original_ridge_valley_clarity",
+                            0.0,
+                        )
+                    ),
+                    1e-6,
+                )
+
+                processed_rvc = float(
+                    candidate_metrics.get(
+                        "processed_ridge_valley_clarity",
+                        0.0,
+                    )
+                )
+
+                rvc_improvement = (processed_rvc / original_rvc - 1.0) * 100.0
+
+                batch_candidate_rows.append(
+                    {
+                        "Method": method,
+                        "CII": float(candidate_metrics.get("cii", 1.0)),
+                        "Sharpness Improvement (%)": float(
+                            candidate_metrics.get(
+                                "sharpness_improvement_pct",
+                                0.0,
+                            )
+                        ),
+                        "RVC Improvement (%)": rvc_improvement,
+                        "Edge Improvement (%)": float(
+                            candidate_metrics.get(
+                                "edge_improvement_pct",
+                                0.0,
+                            )
+                        ),
+                        "SSIM": float(candidate_metrics.get("ssim", 0.0)),
+                        "Detected Minutiae": int(minutiae),
+                        "Processing Time (ms)": float(time_ms),
+                    }
+                )
+
+        batch_candidate_frame = pd.DataFrame(batch_candidate_rows)
+
+        batch_average = (
+            batch_candidate_frame.groupby("Method", sort=False)
+            .mean(numeric_only=True)
+            .reset_index()
+        )
+
+        st.markdown("### Batch Average Comparison")
+        st.caption(
+            f"Average results across {len(records)} processed fingerprint images."
+        )
+
+        batch_display = batch_average.copy()
+
+        batch_display["CII"] = batch_display["CII"].map(lambda value: f"{value:.3f}×")
+
+        batch_display["Sharpness Improvement (%)"] = batch_display[
+            "Sharpness Improvement (%)"
+        ].map(lambda value: f"{value:+.1f}%")
+
+        batch_display["RVC Improvement (%)"] = batch_display["RVC Improvement (%)"].map(
+            lambda value: f"{value:+.1f}%"
+        )
+
+        batch_display["Edge Improvement (%)"] = batch_display[
+            "Edge Improvement (%)"
+        ].map(lambda value: f"{value:+.1f}%")
+
+        batch_display["SSIM"] = batch_display["SSIM"].map(lambda value: f"{value:.3f}")
+
+        batch_display["Detected Minutiae"] = batch_display["Detected Minutiae"].map(
+            lambda value: f"{value:.1f}"
+        )
+
+        batch_display["Processing Time (ms)"] = batch_display[
+            "Processing Time (ms)"
+        ].map(lambda value: "N/A" if pd.isna(value) else f"{value:.2f} ms")
+
+        st.dataframe(
+            batch_display,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # ============================================================
+        # Similar algorithm comparison:
+        # Sobel-based Sharpening vs Conventional Unsharp Masking
+        # ============================================================
+        if "sobel_sharpening_metrics" in selected:
+            st.markdown("### Similar Algorithm Comparison")
+            st.caption(
+                "Comparison between Sobel-based Sharpening and "
+                "Conventional Unsharp Masking on the selected fingerprint."
+            )
+
+            sobel_metrics = selected["sobel_sharpening_metrics"]
+
+            similar_comparison = {
+                "Metric": [
+                    "CII",
+                    "Sharpness Improvement",
+                    "Ridge-Valley Clarity Improvement",
+                    "Edge Clarity Improvement",
+                    "SSIM",
+                    "Detected Minutiae",
+                    "Processing Time",
+                ],
+                "Sobel-based Sharpening": [
+                    f"{sobel_metrics.get('cii', 1.0):.3f}×",
+                    f"{sobel_metrics.get('sharpness_improvement_pct', 0.0):+.1f}%",
+                    f"{rvc_change(sobel_metrics):+.1f}%",
+                    f"{sobel_metrics.get('edge_improvement_pct', 0.0):+.1f}%",
+                    f"{sobel_metrics.get('ssim', 0.0):.3f}",
+                    f"{selected.get('sobel_sharpening_minutiae', 0)}",
+                    f"{selected.get('sobel_sharpening_time_ms', 0.0):.2f} ms",
+                ],
+                "Conventional UM": [
+                    f"{conventional_metrics.get('cii', 1.0):.3f}×",
+                    f"{conventional_metrics.get('sharpness_improvement_pct', 0.0):+.1f}%",
+                    f"{rvc_change(conventional_metrics):+.1f}%",
+                    f"{conventional_metrics.get('edge_improvement_pct', 0.0):+.1f}%",
+                    f"{conventional_metrics.get('ssim', 0.0):.3f}",
+                    f"{selected.get('conventional_unsharp_minutiae', 0)}",
+                    f"{selected.get('conventional_unsharp_time_ms', 0.0):.2f} ms",
+                ],
+            }
+
+            st.dataframe(
+                similar_comparison,
+                use_container_width=True,
+                hide_index=True,
+            )
+
     else:
         original_column, enhanced_column = st.columns(2)
         original_column.image(
@@ -613,7 +790,7 @@ with tabs[0]:
             }
         )
     # Add SSIM row separately
-    ssim_status = "✅" if ssim_val >= 0.80 else "⚠️"
+    ssim_status = "Preserved" if ssim_val >= 0.80 else "Distortion risk"
     comparison_rows.append(
         {
             "Metric": "SSIM (Structural Similarity)",

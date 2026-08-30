@@ -1,7 +1,8 @@
 """Unsharp Masking fingerprint enhancement — Member 4.
 
 Implements conventional linear Unsharp Masking as the baseline method,
-with an enhanced adaptive Unsharp Masking method for comparison.
+with Adaptive and Nonlinear Polynomial Unsharp Masking methods evaluated
+as enhancement candidates.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from algorithms.rhlt.postprocess import (
 from algorithms.rhlt.segmentation import segment_fingerprint
 from algorithms.rhlt.metrics import metric_bundle
 
-PIPELINE_BUILD = "adaptive-unsharp-mask-v1"
+PIPELINE_BUILD = "polynomial-unsharp-mask-v1"
 
 
 def _conventional_unsharp_enhance(
@@ -108,7 +109,7 @@ def _adaptive_unsharp_enhance(
     Apply Adaptive Directional Unsharp Masking.
 
     Based on Polesel et al. (2000).
-    This function will implement the proposed enhanced method.
+    This function implements the first enhancement candidate.
     """
 
     fg = foreground.astype(bool)
@@ -427,6 +428,52 @@ def _nonlinear_polynomial_unsharp_enhance(
     return result
 
 
+def _sobel_sharpen_enhance(
+    gray: np.ndarray,
+    foreground: np.ndarray,
+    gain: float = 0.5,
+) -> np.ndarray:
+    """
+    Apply Sobel-based sharpening as a similar spatial-domain
+    sharpening method for comparison with Conventional UM.
+
+    Sobel estimates horizontal and vertical image gradients.
+    The gradient magnitude is used as an edge-strength signal
+    and added back to the input image.
+    """
+
+    fg = foreground.astype(bool)
+    x = gray.astype(np.float32)
+
+    sobel_x = cv2.Sobel(
+        x,
+        cv2.CV_32F,
+        1,
+        0,
+        ksize=3,
+        borderType=cv2.BORDER_REFLECT,
+    )
+
+    sobel_y = cv2.Sobel(
+        x,
+        cv2.CV_32F,
+        0,
+        1,
+        ksize=3,
+        borderType=cv2.BORDER_REFLECT,
+    )
+
+    gradient_magnitude = cv2.magnitude(sobel_x, sobel_y)
+
+    y = x + gain * gradient_magnitude
+    y = np.clip(y, 0, 255).astype(np.uint8)
+
+    result = gray.copy()
+    result[fg] = y[fg]
+
+    return result
+
+
 def _count_candidate_minutiae(
     image: np.ndarray,
     foreground: np.ndarray,
@@ -528,6 +575,16 @@ def run_algorithm(
 
     polynomial_time_ms = (perf_counter() - polynomial_started) * 1000.0
 
+    sobel_started = perf_counter()
+
+    sobel_enhanced = _sobel_sharpen_enhance(
+        preprocessed,
+        foreground_mask,
+        gain=0.5,
+    )
+
+    sobel_time_ms = (perf_counter() - sobel_started) * 1000.0
+
     # Separate image-quality metrics for baseline and proposed enhancement.
     conventional_metrics = calculate_image_metrics(
         original,
@@ -547,6 +604,17 @@ def run_algorithm(
         foreground_mask=foreground_mask,
     )
 
+    sobel_metrics = calculate_image_metrics(
+        original,
+        sobel_enhanced,
+        foreground_mask=foreground_mask,
+    )
+
+    # Minutiae detected before Unsharp Masking enhancement.
+    original_endings, original_bifurcations = _count_candidate_minutiae(
+        preprocessed,
+        foreground_mask,
+    )
     conventional_endings, conventional_bifurcations = _count_candidate_minutiae(
         conventional_enhanced,
         foreground_mask,
@@ -562,8 +630,13 @@ def run_algorithm(
         foreground_mask,
     )
 
-    # Use Adaptive Unsharp Masking as the final enhanced output.
-    enhanced = adaptive_enhanced
+    sobel_endings, sobel_bifurcations = _count_candidate_minutiae(
+        sobel_enhanced,
+        foreground_mask,
+    )
+
+    # Use Nonlinear Polynomial Unsharp Masking as the final selected enhancement.
+    enhanced = polynomial_enhanced
 
     # Post-processing
     ridge_binary = binarise_dark_ridges(enhanced, foreground_mask)
@@ -606,9 +679,11 @@ def run_algorithm(
         "conventional_unsharp": conventional_enhanced,
         "adaptive_unsharp": adaptive_enhanced,
         "polynomial_unsharp": polynomial_enhanced,
+        "sobel_sharpening": sobel_enhanced,
         "conventional_unsharp_metrics": conventional_metrics,
         "adaptive_unsharp_metrics": adaptive_metrics,
         "polynomial_unsharp_metrics": polynomial_metrics,
+        "sobel_sharpening_metrics": sobel_metrics,
         "foreground_mask": foreground_mask,
         "mask": foreground_mask,
         "orientation_field": orientation_field,
@@ -629,13 +704,14 @@ def run_algorithm(
         "conventional_unsharp_time_ms": float(conventional_time_ms),
         "adaptive_unsharp_time_ms": float(adaptive_time_ms),
         "polynomial_unsharp_time_ms": float(polynomial_time_ms),
+        "sobel_sharpening_time_ms": float(sobel_time_ms),
+        "original_minutiae": int(original_endings + original_bifurcations),
         "conventional_unsharp_minutiae": int(
             conventional_endings + conventional_bifurcations
         ),
-        "adaptive_unsharp_minutiae": int(
-            adaptive_endings + adaptive_bifurcations
-        ),
+        "adaptive_unsharp_minutiae": int(adaptive_endings + adaptive_bifurcations),
         "polynomial_unsharp_minutiae": int(
             polynomial_endings + polynomial_bifurcations
         ),
+        "sobel_sharpening_minutiae": int(sobel_endings + sobel_bifurcations),
     }

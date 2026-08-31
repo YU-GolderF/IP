@@ -170,10 +170,17 @@ def crossing_number_minutiae(
 
 
 def minutiae_overlay(gray: np.ndarray, endings: list[tuple[int, int]], bifurcations: list[tuple[int, int]]) -> np.ndarray:
-    """Create a visual overlay: circles for endings and squares for bifurcations."""
+    """Create an RGB overlay: green circles for endings and red squares for bifurcations."""
     rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
     for x, y in endings:
-        cv2.circle(rgb, (x, y), 4, (255, 255, 255), 1, lineType=cv2.LINE_AA)
+        cv2.circle(rgb, (x, y), 4, (0, 255, 0), 2, lineType=cv2.LINE_AA)
     for x, y in bifurcations:
-        cv2.rectangle(rgb, (x - 4, y - 4), (x + 4, y + 4), (0, 0, 0), 1, lineType=cv2.LINE_AA)
+        cv2.rectangle(
+            rgb,
+            (x - 4, y - 4),
+            (x + 4, y + 4),
+            (255, 0, 0),
+            2,
+            lineType=cv2.LINE_AA,
+        )
     return rgb

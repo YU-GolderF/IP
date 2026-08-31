@@ -6,6 +6,7 @@ import pytest
 
 from algorithms.rhlt import RHLTConfig, run_rhlt
 from algorithms.rhlt.orientation import estimate_orientation_field, smooth_orientation_field
+from algorithms.rhlt.postprocess import minutiae_overlay
 from algorithms.rhlt.ridge_filter import enhance_ridges_with_gabor
 from algorithms.rhlt.segmentation import segment_fingerprint
 from core.preprocessing import preprocess_fingerprint
@@ -113,6 +114,14 @@ def test_all_outputs_correct_dimensions_and_finite():
         assert arr.shape[:2] == shape, f"{key} shape mismatch: {arr.shape}"
         if arr.dtype != bool:
             assert np.isfinite(arr.astype(np.float32)).all(), f"{key} contains non-finite values"
+
+
+def test_minutiae_overlay_uses_visible_rgb_colours():
+    gray = np.full((32, 32), 128, dtype=np.uint8)
+    overlay = minutiae_overlay(gray, endings=[(8, 8)], bifurcations=[(24, 24)])
+
+    assert np.array_equal(overlay[8, 12], np.array([0, 255, 0], dtype=np.uint8))
+    assert np.array_equal(overlay[20, 24], np.array([255, 0, 0], dtype=np.uint8))
 
 
 # ── 9. traditional_rhlt_baseline is uint8 and depends on RHLT response ────────

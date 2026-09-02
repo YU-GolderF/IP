@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import re
 import sys
 from io import BytesIO
@@ -21,8 +22,10 @@ import streamlit as st
 from algorithms import ALGORITHM_STATUS, get_algorithm_runner
 from algorithms.rhlt import config as rhlt_config_module
 from algorithms.rhlt import pipeline as rhlt_pipeline_module
+from algorithms.rhlt import postprocess as rhlt_postprocess_module
 from algorithms.rhlt import ridge_filter as rhlt_ridge_filter_module
 from core import metrics as core_metrics_module
+from reporting import pdf_report as pdf_report_module
 
 # Streamlit can rerun app.py while retaining imported project modules. Reload the
 # implementation modules in dependency order so code changes cannot leave the UI
@@ -32,10 +35,18 @@ core_metrics_module = importlib.reload(core_metrics_module)
 # rerun can construct an old RHLTConfig object and pass it to a new pipeline.
 rhlt_config_module = importlib.reload(rhlt_config_module)
 importlib.reload(rhlt_ridge_filter_module)
+# The overlay renderer is imported directly by pipeline.py. Reload it first so
+# a long-running Streamlit process does not retain the previous black/white
+# marker function after a source-code update.
+rhlt_postprocess_module = importlib.reload(rhlt_postprocess_module)
 rhlt_pipeline_module = importlib.reload(rhlt_pipeline_module)
+pdf_report_module = importlib.reload(pdf_report_module)
 RHLTConfig = rhlt_config_module.RHLTConfig
 run_rhlt = rhlt_pipeline_module.run_rhlt
 run_ablation = rhlt_pipeline_module.run_ablation
+build_pdf_report = pdf_report_module.build_pdf_report
+build_comparison_report = pdf_report_module.build_comparison_report
+encode_png = pdf_report_module.encode_png
 from core import (
     CalibrationConfig,
     DEGRADATION_PRESETS,
@@ -46,19 +57,16 @@ from core import (
     load_multiple_images,
     process_batch,
 )
-from reporting import build_pdf_report, encode_png
-
 st.set_page_config(
     page_title="Fingerprint Enhancement System", page_icon="🔬", layout="wide"
 )
 st.title("Fingerprint Enhancement System")
-APP_BUILD = "rhlt-primary-quality-adaptive-v3.2-2026-08-29"
+APP_BUILD = "rhlt-primary-quality-adaptive-v3.7-2026-08-31"
 st.caption(
     "Shared preprocessing, calibration, batch ingestion and quality metrics with "
     "pluggable team algorithms. RHLT Ridge Flow Restoration is currently available."
 )
 st.caption(f"Build: `{APP_BUILD}`")
-st.caption(f"Algorithm source: `{Path(rhlt_pipeline_module.__file__).resolve()}`")
 
 available_algorithms = [item["name"] for item in ALGORITHM_STATUS if item["available"]]
 
@@ -280,14 +288,19 @@ def _run_selected_algorithm(
     algo_name,
     *,
     final_only=False,
+    preprocessing_settings=None,
+    rhlt_settings=None,
 ):
     """Dispatch to the correct algorithm runner based on the selected name."""
+
+    active_preprocessing_config = preprocessing_settings or preprocessing_config
+    active_rhlt_config = rhlt_settings or rhlt_config
 
     if algo_name == "RHLT":
         return run_rhlt(
             calibrated,
-            rhlt_config,
-            preprocessing_config=preprocessing_config,
+            active_rhlt_config,
+            preprocessing_config=active_preprocessing_config,
         )
 
     runner = get_algorithm_runner(algo_name)
@@ -297,23 +310,39 @@ def _run_selected_algorithm(
     if algo_name == "Unsharp Masking":
         return runner(
             calibrated,
-            preprocessing_config=preprocessing_config,
+            preprocessing_config=active_preprocessing_config,
             final_only=final_only,
         )
 
     return runner(
         calibrated,
-        preprocessing_config=preprocessing_config,
+        preprocessing_config=active_preprocessing_config,
     )
 
 
-def process_loaded_image(item):
-    calibration = calibrate_image(item.image, calibration_config)
+@st.cache_data(show_spinner=False, max_entries=128)
+def process_image_cached(
+    image,
+    filename,
+    algorithm_name,
+    preprocessing_settings,
+    calibration_settings,
+    rhlt_settings,
+    cache_version,
+):
+    """Cache one algorithm result by image content, algorithm and configuration."""
+    _ = filename, cache_version
+    calibration = calibrate_image(image, calibration_settings)
     calibrated = calibration["image"]
-    result = _run_selected_algorithm(calibrated, selected_algorithm)
+    result = _run_selected_algorithm(
+        calibrated,
+        algorithm_name,
+        preprocessing_settings=preprocessing_settings,
+        rhlt_settings=rhlt_settings,
+    )
     preprocessing_stages = result["preprocessing_stages"]
 
-    result["source_original"] = item.image
+    result["source_original"] = image
     result["preprocessing_stages"] = preprocessing_stages
     result["grayscale"] = preprocessing_stages["grayscale"]
     result["denoised"] = preprocessing_stages["denoised"]
@@ -325,9 +354,25 @@ def process_loaded_image(item):
     return result
 
 
-with st.spinner(f"Processing {len(loaded_images)} fingerprint image(s)..."):
+def process_loaded_image(item):
+    return process_image_cached(
+        item.image,
+        item.filename,
+        selected_algorithm,
+        preprocessing_config,
+        calibration_config,
+        rhlt_config,
+        APP_BUILD,
+    )
+
+
+names = [item.filename for item in loaded_images]
+selected_name = st.selectbox("Selected fingerprint", names)
+selected_item = loaded_images[names.index(selected_name)]
+
+with st.spinner(f"Processing selected fingerprint: {selected_name}..."):
     records, processing_errors = process_batch(
-        loaded_images, selected_algorithm, process_loaded_image
+        [selected_item], selected_algorithm, process_loaded_image
     )
 
 if processing_errors:
@@ -338,9 +383,7 @@ if not records:
     st.error("No fingerprint image could be processed.")
     st.stop()
 
-names = [record["filename"] for record in records]
-selected_name = st.selectbox("Selected fingerprint", names)
-selected_record = records[names.index(selected_name)]
+selected_record = records[0]
 selected = selected_record["result"]
 st.caption(f"Active pipeline: `{selected.get('pipeline_build', 'legacy/unknown')}`")
 
@@ -375,20 +418,56 @@ for record in records:
     )
 summary = pd.DataFrame(summary_rows)
 
-tabs = st.tabs(
-    [
-        "📊 Overview",
-        "🔬 Ridge Orientation",
-        "⚙️ Pipeline Internals",
-        "🧪 RHLT Algorithm Internals",
-        "📁 Data Dashboard",
-        "🔭 Research Experiment",
-        "🏆 Algorithm Comparison",
-    ]
-)
+if selected_algorithm == "RHLT":
+    (
+        overview_tab,
+        orientation_tab,
+        pipeline_tab,
+        rhlt_internals_tab,
+        dashboard_tab,
+        comparison_tab,
+    ) = st.tabs(
+        [
+            "📊 Overview",
+            "🔬 Ridge Orientation",
+            "⚙️ Pipeline Internals",
+            "🧪 RHLT Algorithm Internals",
+            "📁 Data Dashboard",
+            "🏆 Algorithm Comparison",
+        ]
+    )
+    rhlt_internals_placeholder = None
+else:
+    (
+        overview_tab,
+        orientation_tab,
+        pipeline_tab,
+        dashboard_tab,
+        comparison_tab,
+    ) = st.tabs(
+        [
+            "📊 Overview",
+            "🔬 Ridge Orientation",
+            "⚙️ Pipeline Internals",
+            "📁 Data Dashboard",
+            "🏆 Algorithm Comparison",
+        ]
+    )
+
+    # The existing RHLT-only render blocks use temporary containers so their
+    # calculations can remain isolated without exposing RHLT pages in the UI.
+    rhlt_internals_placeholder = st.empty()
+    rhlt_internals_tab = rhlt_internals_placeholder.container()
+
+# The assignment requires experimental evidence in the report, but not a
+# dedicated prototype page. Keep the legacy experiment renderer detached from
+# the visible navigation; Data Dashboard and Algorithm Comparison provide the
+# required prototype evidence more directly.
+research_placeholder = st.empty()
+research_tab = research_placeholder.container()
 
 # ── Tab 0: Overview ─────────────────────────────────────────────────────────
-with tabs[0]:
+with overview_tab:
     # --- KPI headline cards ---
     cii_val = float(metrics.get("cii", 1.0))
     ssim_val = float(metrics.get("ssim", 0.0))
@@ -406,6 +485,11 @@ with tabs[0]:
         st.success(
             f"Recommended output: **{selected_output_label(selected)}** — "
             f"{selected.get('selection_reason', 'quality checks completed.')}"
+        )
+        st.caption(
+            f"KPI basis: Original vs **{selected_output_label(selected)}**. "
+            "The cards below always describe the final selected output, not automatically "
+            "the Traditional RHLT candidate."
         )
 
     kpi_cols = st.columns(4)
@@ -770,13 +854,20 @@ with tabs[0]:
         if selected_algorithm == "RHLT"
         else selected_algorithm
     )
-    overview_details = st.expander(
-        f"Detailed metrics · Original vs {evaluated_output}", expanded=False
-    )
-    overview_details.caption(
-        "In this table, Selected output refers to the exact image returned as enhanced_image, "
-        "not automatically to every candidate shown above."
-    )
+    if selected_algorithm == "RHLT":
+        details_title = "Detailed metrics · Original vs Traditional vs Proposed Improved RHLT"
+        details_caption = (
+            "Traditional and Proposed Improved are measured independently against the same "
+            "original input. A higher metric is shown for quick comparison, but sharpness "
+            "alone does not guarantee better ridge structure."
+        )
+    else:
+        details_title = f"Detailed metrics · Original vs {evaluated_output}"
+        details_caption = (
+            "Selected output refers to the exact image returned as enhanced_image."
+        )
+    overview_details = st.expander(details_title, expanded=False)
+    overview_details.caption(details_caption)
     comparison_metrics = [
         ("Contrast", "original_contrast", "processed_contrast", 4),
         (
@@ -788,9 +879,40 @@ with tabs[0]:
         ("Sharpness (Laplacian)", "original_sharpness", "processed_sharpness", 1),
         ("Edge Clarity (Sobel)", "original_edge_clarity", "processed_edge_clarity", 2),
     ]
+    traditional_candidate_metrics = selected.get("traditional_rhlt_metrics", {})
+    improved_candidate_metrics = selected.get("improved_rhlt_metrics", {})
     comparison_rows = []
     for label, original_key, enhanced_key, decimals in comparison_metrics:
         original_value = metrics.get(original_key)
+        if selected_algorithm == "RHLT":
+            traditional_value = traditional_candidate_metrics.get(enhanced_key)
+            improved_value = improved_candidate_metrics.get(enhanced_key)
+            if original_value is None or traditional_value is None or improved_value is None:
+                continue
+            original_value = float(original_value)
+            traditional_value = float(traditional_value)
+            improved_value = float(improved_value)
+            difference = improved_value - traditional_value
+            difference_pct = difference / max(abs(traditional_value), 1e-9) * 100.0
+            higher_metric = (
+                "Proposed Improved"
+                if improved_value > traditional_value
+                else "Traditional"
+                if traditional_value > improved_value
+                else "Tie"
+            )
+            comparison_rows.append(
+                {
+                    "Metric": label,
+                    "Original": f"{original_value:.{decimals}f}",
+                    "Traditional RHLT": f"{traditional_value:.{decimals}f}",
+                    "Proposed Improved RHLT": f"{improved_value:.{decimals}f}",
+                    "Improved − Traditional": f"{difference:+.{decimals}f}",
+                    "Difference %": f"{difference_pct:+.2f}%",
+                    "Higher metric": higher_metric,
+                }
+            )
+            continue
         enhanced_value = metrics.get(enhanced_key)
         if original_value is None or enhanced_value is None:
             continue
@@ -810,18 +932,40 @@ with tabs[0]:
                 "Status": status,
             }
         )
-    # Add SSIM row separately
-    ssim_status = "Preserved" if ssim_val >= 0.80 else "Distortion risk"
-    comparison_rows.append(
-        {
-            "Metric": "SSIM (Structural Similarity)",
-            "Original": "1.000 (reference)",
-            "Selected output": f"{ssim_val:.3f}",
-            "Change": f"{ssim_val - 1.0:+.3f}",
-            "Change %": f"{(ssim_val - 1.0) * 100:+.1f}%",
-            "Status": ssim_status,
-        }
-    )
+    # Add SSIM separately because the original is the 1.000 structural reference.
+    if selected_algorithm == "RHLT":
+        traditional_ssim = float(traditional_candidate_metrics.get("ssim", 0.0))
+        improved_ssim = float(improved_candidate_metrics.get("ssim", 0.0))
+        ssim_difference = improved_ssim - traditional_ssim
+        comparison_rows.append(
+            {
+                "Metric": "SSIM (Structural Similarity)",
+                "Original": "1.000 (reference)",
+                "Traditional RHLT": f"{traditional_ssim:.3f}",
+                "Proposed Improved RHLT": f"{improved_ssim:.3f}",
+                "Improved − Traditional": f"{ssim_difference:+.3f}",
+                "Difference %": f"{ssim_difference / max(abs(traditional_ssim), 1e-9) * 100:+.2f}%",
+                "Higher metric": (
+                    "Proposed Improved"
+                    if improved_ssim > traditional_ssim
+                    else "Traditional"
+                    if traditional_ssim > improved_ssim
+                    else "Tie"
+                ),
+            }
+        )
+    else:
+        ssim_status = "Preserved" if ssim_val >= 0.80 else "Distortion risk"
+        comparison_rows.append(
+            {
+                "Metric": "SSIM (Structural Similarity)",
+                "Original": "1.000 (reference)",
+                "Selected output": f"{ssim_val:.3f}",
+                "Change": f"{ssim_val - 1.0:+.3f}",
+                "Change %": f"{(ssim_val - 1.0) * 100:+.1f}%",
+                "Status": ssim_status,
+            }
+        )
     overview_details.dataframe(
         pd.DataFrame(comparison_rows), width="stretch", hide_index=True
     )
@@ -857,7 +1001,7 @@ with tabs[0]:
     )
 
 # ── Tab 2: Pipeline Internals ─────────────────────────────────────────────────
-with tabs[2]:
+with pipeline_tab:
     st.caption(
         "These are the intermediate processing stages of the shared preprocessing pipeline. "
         "They are intended for technical inspection and debugging — not for evaluating enhancement quality."
@@ -889,7 +1033,7 @@ with tabs[2]:
         st.image(selected["minutiae_overlay"], clamp=True, use_container_width=True)
 
 # ── Tab 1: Ridge Orientation ─────────────────────────────────────────────────
-with tabs[1]:
+with orientation_tab:
     st.caption(
         "The orientation field estimates the local ridge flow direction across the fingerprint. "
         "It drives the direction-adaptive Gabor filter used for ridge enhancement."
@@ -927,7 +1071,7 @@ with tabs[1]:
         st.info(f"Ridge orientation data is not provided by {selected_algorithm}.")
 
 # ── Tab 3: RHLT Algorithm Internals ──────────────────────────────────────────
-with tabs[3]:
+with rhlt_internals_tab:
     st.caption(
         "This page shows all stages of the RHLT-primary pipeline: the spiral-phase edge response, "
         "the RHLT-based traditional baseline, the orientation-guided Gabor support component, "
@@ -1052,14 +1196,59 @@ with tabs[3]:
         st.info("RHLT Algorithm Internals is specific to the RHLT algorithm.")
 
 # ── Tab 4: Data Dashboard ─────────────────────────────────────────────────────
-with tabs[4]:
+if rhlt_internals_placeholder is not None:
+    rhlt_internals_placeholder.empty()
+
+with dashboard_tab:
     st.subheader("Batch enhancement summary")
     st.caption(
-        "One row per image processed in this session. All key quality indicators are included."
+        "The selected fingerprint is processed immediately. Run the full batch only when "
+        "you need dataset-level metrics or downloads. Cached fingerprints are not recomputed."
     )
+    batch_signature = tuple(
+        (
+            item.filename,
+            tuple(item.image.shape),
+            str(item.image.dtype),
+            hashlib.sha256(np.ascontiguousarray(item.image).tobytes()).hexdigest(),
+        )
+        for item in loaded_images
+    )
+    batch_state_key = f"full_batch::{APP_BUILD}::{selected_algorithm}"
+    batch_is_ready = st.session_state.get(batch_state_key) == batch_signature
+    run_full_batch = st.button(
+        (
+            f"Refresh all {len(loaded_images)} fingerprints"
+            if batch_is_ready
+            else f"Process all {len(loaded_images)} fingerprints"
+        ),
+        type="primary",
+        disabled=len(loaded_images) <= 1,
+        key=f"run_full_batch_{selected_algorithm}",
+    )
+    if run_full_batch:
+        st.session_state[batch_state_key] = batch_signature
+        batch_is_ready = True
+
+    batch_records = records
+    batch_errors = []
+    if batch_is_ready:
+        with st.spinner(f"Processing all {len(loaded_images)} fingerprint image(s)..."):
+            batch_records, batch_errors = process_batch(
+                loaded_images, selected_algorithm, process_loaded_image
+            )
+        if batch_errors:
+            st.warning(f"{len(batch_errors)} image(s) failed during batch processing.")
+            st.dataframe(pd.DataFrame(batch_errors), width="stretch", hide_index=True)
+    elif len(loaded_images) > 1:
+        st.info(
+            "Showing the selected fingerprint only. Use the button above to generate "
+            "the complete batch summary."
+        )
+
     # Build enriched summary with the new metrics
     summary_rows = []
-    for record in records:
+    for record in batch_records:
         result = record["result"]
         result_metrics = result["metrics"]
         calibration = result["calibration"]
@@ -1074,6 +1263,9 @@ with tabs[4]:
                 "Sharpness Δ%": f"{result_metrics.get('sharpness_improvement_pct', 0.0):+.1f}%",
                 "Edge Clarity Δ%": f"{result_metrics.get('edge_improvement_pct', 0.0):+.1f}%",
                 "SSIM": f"{result_metrics.get('ssim', 0.0):.3f}",
+                "SSIM Δ vs input": (
+                    f"{(float(result_metrics.get('ssim', 0.0)) - 1.0) * 100.0:+.1f}%"
+                ),
                 "Orientation Coherence": f"{result_metrics.get('mean_orientation_coherence', 0.0):.3f}",
                 "Minutiae Total": int(result_metrics.get("minutiae_total", 0)),
                 "Foreground %": f"{result_metrics.get('foreground_coverage_percent', 0.0):.1f}%",
@@ -1082,7 +1274,7 @@ with tabs[4]:
         )
     enriched_summary = pd.DataFrame(summary_rows)
     batch_ssim = [
-        float(record["result"]["metrics"].get("ssim", 0.0)) for record in records
+        float(record["result"]["metrics"].get("ssim", 0.0)) for record in batch_records
     ]
     batch_rvc = [
         (
@@ -1100,12 +1292,21 @@ with tabs[4]:
             - 1.0
         )
         * 100.0
-        for record in records
+        for record in batch_records
     ]
-    batch_time = [float(record["processing_time_ms"]) for record in records]
+    batch_time = [float(record["processing_time_ms"]) for record in batch_records]
+    mean_batch_ssim = float(np.mean(batch_ssim))
     batch_cards = st.columns(4)
-    batch_cards[0].metric("Processed", len(records))
-    batch_cards[1].metric("Average SSIM", f"{np.mean(batch_ssim):.3f}")
+    batch_cards[0].metric("Processed", len(batch_records))
+    batch_cards[1].metric(
+        "Average SSIM",
+        f"{mean_batch_ssim:.3f}",
+        delta=f"{(mean_batch_ssim - 1.0) * 100.0:+.1f}% vs input",
+        help=(
+            "SSIM compares the enhanced image with its input. The input reference is "
+            "1.000, so this delta measures structural change/preservation, not a quality gain."
+        ),
+    )
     batch_cards[2].metric("Average RVC change", f"{np.mean(batch_rvc):+.1f}%")
     batch_cards[3].metric("Average time", f"{np.mean(batch_time):.1f} ms")
 
@@ -1115,6 +1316,7 @@ with tabs[4]:
         "CII (contrast)",
         "Sharpness Δ%",
         "SSIM",
+        "SSIM Δ vs input",
         "Time (ms)",
     ]
     st.dataframe(enriched_summary[concise_columns], width="stretch", hide_index=True)
@@ -1127,7 +1329,7 @@ with tabs[4]:
 
     zip_buffer = BytesIO()
     with ZipFile(zip_buffer, "w", ZIP_DEFLATED) as archive:
-        for record in records:
+        for record in batch_records:
             result = record["result"]
             stem = record["filename"].rsplit(".", 1)[0]
             archive.writestr(
@@ -1152,7 +1354,7 @@ with tabs[4]:
         "application/zip",
     )
 
-with tabs[5]:
+with research_tab:
     st.subheader("Controlled degradation with clean ground truth")
     overview_details.caption(
         "The 13 original BMP samples are treated as clean references. Blur, contrast "
@@ -1550,7 +1752,10 @@ with tabs[5]:
         st.info("The ablation study experiment is currently only configured for RHLT.")
 
 # ── Tab 6: Algorithm Comparison ───────────────────────────────────────────────
-with tabs[6]:
+if research_placeholder is not None:
+    research_placeholder.empty()
+
+with comparison_tab:
     st.caption(
         "Run **all available algorithms** on the selected fingerprint image and compare "
         "their enhancement quality side by side. This satisfies the Technical Requirement "
@@ -1674,8 +1879,6 @@ with tabs[6]:
             st.divider()
 
             # --- Download comparison PDF ---
-            from reporting import build_comparison_report
-
             comparison_pdf = build_comparison_report(
                 selected_name,
                 source_image,

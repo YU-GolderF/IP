@@ -37,7 +37,7 @@ from .quality import defect_aware_fusion_weight, local_ridge_quality_maps
 from .ridge_filter import enhance_ridges_with_gabor, isolate_ridges
 from .segmentation import segment_fingerprint
 
-PIPELINE_BUILD = "rhlt-primary-quality-adaptive-v3.1"
+PIPELINE_BUILD = "rhlt-primary-quality-adaptive-v3.2"
 
 
 def _adapt_settings_to_image(

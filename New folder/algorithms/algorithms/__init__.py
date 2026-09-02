@@ -4,7 +4,7 @@ ALGORITHM_STATUS = (
     {"key": "rhlt", "name": "RHLT", "owner": "Member 1", "available": True},
     {"key": "algorithm_2", "name": "Gabor Filter Bank", "owner": "Member 2", "available": True},
     {"key": "algorithm_3", "name": "Histogram Equalization", "owner": "Member 3", "available": True},
-    {"key": "algorithm_4", "name": "Unsharp Masking", "owner": "Member 4", "available": True},
+    {"key": "unsharp_masking", "name": "Unsharp Masking", "owner": "Member 4", "available": True},
 )
 
 

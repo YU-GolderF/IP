@@ -1,5 +1,5 @@
-"""Gabor Filter Bank fingerprint enhancement — placeholder for Member 2."""
+"""Independent DCT-based contextual fingerprint enhancement."""
+from .config import DCTContextualConfig
+from .pipeline import ALGORITHM_NAME, run_algorithm
 
-from .pipeline import run_algorithm
-
-__all__ = ["run_algorithm"]
+__all__ = ["ALGORITHM_NAME", "DCTContextualConfig", "run_algorithm"]

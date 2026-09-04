@@ -61,7 +61,7 @@ st.set_page_config(
     page_title="Fingerprint Enhancement System", page_icon="🔬", layout="wide"
 )
 st.title("Fingerprint Enhancement System")
-APP_BUILD = "rhlt-primary-quality-adaptive-v3.7-2026-08-31"
+APP_BUILD = "rhlt-primary-quality-adaptive-v3.8-2026-09-03"
 st.caption(
     "Shared preprocessing, calibration, batch ingestion and quality metrics with "
     "pluggable team algorithms. RHLT Ridge Flow Restoration is currently available."
@@ -332,8 +332,21 @@ def process_image_cached(
 ):
     """Cache one algorithm result by image content, algorithm and configuration."""
     _ = filename, cache_version
-    calibration = calibrate_image(image, calibration_settings)
-    calibrated = calibration["image"]
+    if algorithm_name == "DCT-based Contextual Filtering":
+        # Li et al. starts from its source image; shared geometric calibration
+        # would make this paper-specific pipeline a different method.
+        calibrated = image
+        height, width = image.shape[:2]
+        calibration = {
+            "image": image,
+            "original_dimensions": (int(width), int(height)),
+            "processed_dimensions": (int(width), int(height)),
+            "rotation_degrees": 0.0,
+            "rectified": False,
+        }
+    else:
+        calibration = calibrate_image(image, calibration_settings)
+        calibrated = calibration["image"]
     result = _run_selected_algorithm(
         calibrated,
         algorithm_name,
@@ -561,6 +574,47 @@ with overview_tab:
                 clamp=True,
                 use_container_width=True,
             )
+
+    elif selected_algorithm == "DCT-based Contextual Filtering":
+        st.caption(
+            "Fingerprint-evidence comparison. Each candidate uses the same input and the same downstream evaluation layer."
+        )
+        original_column, hard_column, soft_column, improved_column = st.columns(4)
+        original_column.image(selected["source_original"], caption="Original fingerprint", use_container_width=True)
+        for column, method, caption in (
+            (hard_column, "basic_dct", "Basic DCT contextual filtering"),
+            (soft_column, "adaptive_frequency", "DCT + adaptive frequency"),
+            (improved_column, "proposed", "Proposed full DCT method"),
+        ):
+            column.image(selected["method_results"][method]["image"], caption=caption, clamp=True, use_container_width=True)
+
+        evidence_rows = []
+        for method, label in (
+            ("basic_dct", "Basic DCT contextual filtering"),
+            ("adaptive_frequency", "DCT + adaptive frequency"),
+            ("confidence_aware", "DCT + confidence-aware filtering"),
+            ("proposed", "Proposed full DCT method"),
+        ):
+            candidate_metrics = selected["method_results"][method]["metrics"]
+            original_rvc = max(float(candidate_metrics.get("original_ridge_valley_clarity", 0.0)), 1e-6)
+            rvc_change = (float(candidate_metrics.get("processed_ridge_valley_clarity", 0.0)) / original_rvc - 1.0) * 100.0
+            evidence_rows.append(
+                {
+                    "Method": label,
+                    "CII": f"{float(candidate_metrics.get('cii', 1.0)):.3f}×",
+                    "Sharpness Δ": f"{float(candidate_metrics.get('sharpness_improvement_pct', 0.0)):+.1f}%",
+                    "RVC Δ": f"{rvc_change:+.1f}%",
+                    "Edge clarity Δ": f"{float(candidate_metrics.get('edge_improvement_pct', 0.0)):+.1f}%",
+                    "SSIM vs input": f"{float(candidate_metrics.get('ssim', 0.0)):.3f}",
+                    "Orientation coherence": f"{float(candidate_metrics.get('mean_orientation_coherence', 0.0)):.3f}",
+                    "Minutiae": int(candidate_metrics.get("minutiae_total", 0)),
+                }
+            )
+        st.dataframe(pd.DataFrame(evidence_rows), width="stretch", hide_index=True)
+        st.info(
+            "For ridge clarity, look for positive CII / Sharpness / RVC changes together with a "
+            "high SSIM and a visually continuous orientation field. A single higher sharpness value is not sufficient evidence."
+        )
 
     elif selected_algorithm == "Unsharp Masking":
         original_column, conventional_column, adaptive_column, polynomial_column = (
@@ -1007,22 +1061,46 @@ with pipeline_tab:
         "They are intended for technical inspection and debugging — not for evaluating enhancement quality."
     )
     stages = selected["preprocessing_stages"]
-    stage_images = [
-        ("Grayscale", stages["grayscale"]),
-        ("Gaussian denoised", stages["gaussian_denoised"]),
-        ("Median / denoised", stages["denoised"]),
-        ("Intensity normalised", stages["normalised"]),
-        ("CLAHE enhanced", stages["enhanced"]),
-        (
-            "Fingerprint foreground mask",
-            (selected["foreground_mask"].astype("uint8") * 255),
-        ),
-        ("Ridge flow restored", selected["ridge_restored"]),
-        (
-            f"Skeleton (minutiae: {int(metrics.get('minutiae_total', 0))})",
-            (selected["skeleton"].astype("uint8") * 255),
-        ),
-    ]
+    if selected_algorithm == "DCT-based Contextual Filtering":
+        st.caption(
+            "Algorithm 2 stages are independent DCT contextual filtering. Mask, orientation and skeleton are "
+            "post-output evaluation diagnostics; they are not fed back into the DCT method."
+        )
+        stage_images = [
+            ("Grayscale input", stages["grayscale"]),
+            ("2-D wavelet branch · Improved Eq. (14)", stages["wavelet_branch"]),
+            ("Finite-ridgelet branch · Improved Eq. (14)", stages["ridgelet_branch"]),
+            ("Wavelet-domain fusion", stages["fusion_pre_wiener"]),
+            ("Final fusion + Wiener", stages["enhanced"]),
+            ("Fingerprint foreground mask", selected["foreground_mask"].astype("uint8") * 255),
+            ("Orientation evaluation", selected["orientation_visualisation"]),
+            (f"Skeleton (minutiae: {int(metrics.get('minutiae_total', 0))})", selected["skeleton"].astype("uint8") * 255),
+        ]
+        # Replace the legacy Algorithm 2 labels with the actual independent
+        # DCT stages. The map/skeleton items remain downstream diagnostics.
+        stage_images = [
+            ("Grayscale input", stages["grayscale"]),
+            ("Intensity normalisation", stages["normalised"]),
+            ("DCT contextual reconstruction", stages["dct_contextual"]),
+            ("Final ROI contrast restoration", stages["enhanced"]),
+            ("Fingerprint foreground mask", selected["foreground_mask"].astype("uint8") * 255),
+            ("DCT local orientation map", diagnostic_map_to_uint8(selected["dct_orientation_map"], selected["foreground_mask"])),
+            ("DCT local ridge frequency map", diagnostic_map_to_uint8(selected["frequency_map"], selected["foreground_mask"])),
+            ("DCT confidence map", diagnostic_map_to_uint8(selected["confidence_map"], selected["foreground_mask"])),
+            ("Evaluation orientation", selected["orientation_visualisation"]),
+            (f"Skeleton (minutiae: {int(metrics.get('minutiae_total', 0))})", selected["skeleton"].astype("uint8") * 255),
+        ]
+    else:
+        stage_images = [
+            ("Grayscale", stages["grayscale"]),
+            ("Gaussian denoised", stages["gaussian_denoised"]),
+            ("Median / denoised", stages["denoised"]),
+            ("Intensity normalised", stages["normalised"]),
+            ("CLAHE enhanced", stages["enhanced"]),
+            ("Fingerprint foreground mask", selected["foreground_mask"].astype("uint8") * 255),
+            ("Ridge flow restored", selected["ridge_restored"]),
+            (f"Skeleton (minutiae: {int(metrics.get('minutiae_total', 0))})", selected["skeleton"].astype("uint8") * 255),
+        ]
     for start in range(0, len(stage_images), 4):
         columns = st.columns(4)
         for column, (label, image) in zip(columns, stage_images[start : start + 4]):

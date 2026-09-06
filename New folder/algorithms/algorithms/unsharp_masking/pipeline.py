@@ -34,7 +34,7 @@ from algorithms.rhlt.postprocess import (
 from algorithms.rhlt.segmentation import segment_fingerprint
 from algorithms.rhlt.metrics import metric_bundle
 
-PIPELINE_BUILD = "polynomial-unsharp-mask-v1"
+PIPELINE_BUILD = "polynomial-unsharp-mask-v1.1-fast-adaptive"
 
 
 # ============================================================
@@ -217,49 +217,56 @@ def _adaptive_unsharp_enhance(
 
     adaptive_output = x.copy()
 
-    lambda_vector = np.zeros(2, dtype=np.float32)
+    # Scalar state is mathematically equivalent to the original 2 x 2 matrix
+    # update, but avoids allocating several NumPy arrays and running an SVD-
+    # based pseudo-inverse for every pixel.  The regularisation below keeps the
+    # symmetric autocorrelation matrix invertible.
+    lambda_x = 0.0
+    lambda_y = 0.0
+    r_xx = 1.0
+    r_xy = 0.0
+    r_yy = 1.0
 
-    # Stable initial autocorrelation matrix
-    R = np.eye(2, dtype=np.float32)
-
+    one_minus_beta = 1.0 - beta
+    update_scale = 2.0 * mu
     epsilon = 1e-6
 
     for n in range(height):
         for m in range(width):
 
             # Equation (15)
-            G = np.array(
-                [
-                    g_zx[n, m],
-                    g_zy[n, m],
-                ],
-                dtype=np.float32,
-            )
+            g0 = float(g_zx[n, m])
+            g1 = float(g_zy[n, m])
 
             # Equation (14)
-            g_y = g_x[n, m] + float(np.dot(lambda_vector, G))
+            g_y = float(g_x[n, m]) + lambda_x * g0 + lambda_y * g1
 
-            e = g_d[n, m] - g_y
+            e = float(g_d[n, m]) - g_y
 
             # Equation (5)
             adaptive_output[n, m] = (
-                x[n, m] + lambda_vector[0] * z_x[n, m] + lambda_vector[1] * z_y[n, m]
+                float(x[n, m])
+                + lambda_x * float(z_x[n, m])
+                + lambda_y * float(z_y[n, m])
             )
 
             # Equation (17)
-            R = (1.0 - beta) * R + beta * np.outer(G, G)
+            r_xx = one_minus_beta * r_xx + beta * g0 * g0
+            r_xy = one_minus_beta * r_xy + beta * g0 * g1
+            r_yy = one_minus_beta * r_yy + beta * g1 * g1
 
-            # Numerical implementation of Equation (16)
-            regularised_R = R.astype(np.float64) + epsilon * np.eye(
-                2,
-                dtype=np.float64,
-            )
-
-            update_direction = (
-                np.linalg.pinv(regularised_R) @ G.astype(np.float64)
-            ).astype(np.float32)
-
-            lambda_vector = lambda_vector + 2.0 * mu * e * update_direction
+            # Numerical implementation of Equation (16). For the regularised
+            # symmetric 2 x 2 matrix [[a, b], [b, d]], this closed-form solve
+            # is equivalent to inv(R) @ G and avoids a per-pixel pinv call.
+            a = r_xx + epsilon
+            b = r_xy
+            d = r_yy + epsilon
+            determinant = a * d - b * b
+            if determinant > 1e-12:
+                update_x = (d * g0 - b * g1) / determinant
+                update_y = (a * g1 - b * g0) / determinant
+                lambda_x += update_scale * e * update_x
+                lambda_y += update_scale * e * update_y
 
     adaptive_output = np.clip(
         adaptive_output,

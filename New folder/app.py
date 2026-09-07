@@ -61,7 +61,7 @@ st.set_page_config(
     page_title="Fingerprint Enhancement System", page_icon="🔬", layout="wide"
 )
 st.title("Fingerprint Enhancement System")
-APP_BUILD = "rhlt-primary-quality-adaptive-v3.8-2026-09-03"
+APP_BUILD = "main-rhlt-report-evidence-v4.1-2026-09-07"
 st.caption(
     "Shared preprocessing, calibration, batch ingestion and quality metrics with "
     "pluggable team algorithms. RHLT Ridge Flow Restoration is currently available."
@@ -221,6 +221,15 @@ def comparison_quality_score(metrics: dict) -> float:
     return float(
         100.0 * (0.15 * contrast + 0.25 * rvc + 0.20 * edge + 0.40 * structural)
     )
+
+
+def metric_percentage_change(
+    metrics: dict, original_key: str, processed_key: str
+) -> float:
+    """Return a signed percentage change while safely handling a zero reference."""
+    original = float(metrics.get(original_key, 0.0))
+    processed = float(metrics.get(processed_key, 0.0))
+    return (processed - original) / max(abs(original), 1e-9) * 100.0
 
 
 @st.cache_data(show_spinner=False)
@@ -1183,6 +1192,43 @@ with rhlt_internals_tab:
             f"{selected.get('mean_fusion_weight', 0.0) * 100.0:.1f}% avg",
         )
 
+        score_explanation = st.expander(
+            "How the RHLT candidate decision is made", expanded=False
+        )
+        score_explanation.markdown(
+            "Traditional and Proposed RHLT are evaluated from the same input. The selector "
+            "first checks structural safety, then compares their balanced quality scores with "
+            "the configured regression tolerance. A slightly higher sharpness value alone does "
+            "not determine the final output."
+        )
+        score_components = selected.get("quality_score_components", {})
+        if score_components:
+            component_rows = []
+            for candidate, components in score_components.items():
+                if not isinstance(components, dict):
+                    continue
+                component_rows.append(
+                    {
+                        "Candidate": str(candidate).replace("_", " ").title(),
+                        **{
+                            str(key).replace("_", " ").title(): (
+                                f"{float(value):.4f}"
+                                if isinstance(value, (int, float, np.number))
+                                else str(value)
+                            )
+                            for key, value in components.items()
+                            if key != "safe"
+                        },
+                        "Structural safety": (
+                            "Passed" if components.get("safe", True) else "Failed"
+                        ),
+                    }
+                )
+            if component_rows:
+                score_explanation.dataframe(
+                    pd.DataFrame(component_rows), width="stretch", hide_index=True
+                )
+
         # Row 1: RHLT diagnostics
         rhlt_diagnostics = st.expander(
             "Technical RHLT response and configuration", expanded=False
@@ -1280,6 +1326,153 @@ with rhlt_internals_tab:
             }
             candidate_details.dataframe(
                 pd.DataFrame(cand_data), width="stretch", hide_index=True
+            )
+
+            st.subheader("Report-ready RHLT comparison")
+            st.caption(
+                "This section is generated only for RHLT and is designed for direct use in "
+                "the RHLT results section of the assignment report."
+            )
+            traditional_changes = {
+                "Contrast": (float(tm.get("cii", 1.0)) - 1.0) * 100.0,
+                "RVC": metric_percentage_change(
+                    tm,
+                    "original_ridge_valley_clarity",
+                    "processed_ridge_valley_clarity",
+                ),
+                "Sharpness": float(tm.get("sharpness_improvement_pct", 0.0)),
+                "Edge clarity": float(tm.get("edge_improvement_pct", 0.0)),
+            }
+            improved_changes = {
+                "Contrast": (float(im.get("cii", 1.0)) - 1.0) * 100.0,
+                "RVC": metric_percentage_change(
+                    im,
+                    "original_ridge_valley_clarity",
+                    "processed_ridge_valley_clarity",
+                ),
+                "Sharpness": float(im.get("sharpness_improvement_pct", 0.0)),
+                "Edge clarity": float(im.get("edge_improvement_pct", 0.0)),
+            }
+            st.bar_chart(
+                pd.DataFrame(
+                    {
+                        "Traditional RHLT": traditional_changes,
+                        "Proposed Improved RHLT": improved_changes,
+                    }
+                ),
+                stack=False,
+            )
+            st.caption(
+                "Percentage change from the same original input. SSIM is excluded because "
+                "it is a structural-preservation index rather than an enhancement percentage."
+            )
+
+            score_delta = float(selected.get("improved_quality_score", 0.0)) - float(
+                selected.get("traditional_quality_score", 0.0)
+            )
+            ssim_delta = float(im.get("ssim", 0.0)) - float(tm.get("ssim", 0.0))
+            st.markdown("#### Proposed structural-quality advantage")
+            st.caption(
+                "Proposed-minus-Traditional differences make small structural advantages "
+                "visible without using a truncated 0–100 comparison chart."
+            )
+            delta_cols = st.columns(2)
+            delta_cols[0].metric(
+                "SSIM advantage",
+                f"{ssim_delta:+.3f}",
+                f"{ssim_delta * 100.0:+.2f} percentage points",
+            )
+            delta_cols[1].metric(
+                "Balanced quality advantage",
+                f"{score_delta:+.4f}",
+                f"{score_delta * 100.0:+.2f} percentage points",
+            )
+            delta_frame = pd.DataFrame(
+                {
+                    "Metric": ["SSIM", "Balanced quality score"],
+                    "Advantage (percentage points)": [
+                        ssim_delta * 100.0,
+                        score_delta * 100.0,
+                    ],
+                    "Label": [
+                        f"{ssim_delta * 100.0:+.2f} pp",
+                        f"{score_delta * 100.0:+.2f} pp",
+                    ],
+                }
+            )
+            st.vega_lite_chart(
+                delta_frame,
+                {
+                    "height": 180,
+                    "layer": [
+                        {
+                            "mark": {
+                                "type": "bar",
+                                "color": "#20A464",
+                                "cornerRadiusEnd": 4,
+                            },
+                            "encoding": {
+                                "y": {
+                                    "field": "Metric",
+                                    "type": "nominal",
+                                    "sort": None,
+                                    "axis": {"title": None},
+                                },
+                                "x": {
+                                    "field": "Advantage (percentage points)",
+                                    "type": "quantitative",
+                                    "scale": {"zero": True},
+                                    "axis": {
+                                        "title": "Proposed - Traditional (percentage points)"
+                                    },
+                                },
+                                "tooltip": [
+                                    {"field": "Metric", "type": "nominal"},
+                                    {
+                                        "field": "Advantage (percentage points)",
+                                        "type": "quantitative",
+                                        "format": "+.2f",
+                                    },
+                                ],
+                            },
+                        },
+                        {
+                            "mark": {
+                                "type": "text",
+                                "align": "left",
+                                "baseline": "middle",
+                                "dx": 6,
+                                "fontWeight": "bold",
+                            },
+                            "encoding": {
+                                "y": {
+                                    "field": "Metric",
+                                    "type": "nominal",
+                                    "sort": None,
+                                },
+                                "x": {
+                                    "field": "Advantage (percentage points)",
+                                    "type": "quantitative",
+                                },
+                                "text": {"field": "Label", "type": "nominal"},
+                            },
+                        },
+                    ],
+                },
+                width="stretch",
+            )
+            st.caption(
+                "Positive values favour Proposed Improved RHLT. These are small absolute "
+                "advantages and do not by themselves establish statistical significance."
+            )
+            st.markdown(
+                "**Result statement (copy-ready):** "
+                f"For **{selected_name}**, Traditional RHLT produced marginally stronger "
+                "enhancement measurements, while Proposed Improved RHLT retained "
+                f"slightly greater structural similarity ({im.get('ssim', 0.0):.3f} versus "
+                f"{tm.get('ssim', 0.0):.3f}). The Proposed candidate passed the structural "
+                f"safety checks and achieved a quality-score difference of {score_delta:+.4f}; "
+                f"therefore, **{selected_output_label(selected)}** was returned."
             )
     else:
         st.info("RHLT Algorithm Internals is specific to the RHLT algorithm.")
@@ -1726,6 +1919,139 @@ with dashboard_tab:
                 "unsharp_masking_experimental_evidence.csv",
                 "text/csv",
             )
+
+    if selected_algorithm == "RHLT":
+        st.divider()
+        st.subheader("Report-ready RHLT batch evidence")
+        st.caption(
+            "The table reports mean ± sample standard deviation when at least two images "
+            "have been processed. Run the full batch before using these values in Chapter 4."
+        )
+        numeric_batch_rows = []
+        for record in batch_records:
+            result = record["result"]
+            result_metrics = result["metrics"]
+            numeric_batch_rows.append(
+                {
+                    "Filename": record["filename"],
+                    "Selected output": selected_output_label(result),
+                    "Contrast change (%)": (
+                        float(result_metrics.get("cii", 1.0)) - 1.0
+                    )
+                    * 100.0,
+                    "RVC change (%)": metric_percentage_change(
+                        result_metrics,
+                        "original_ridge_valley_clarity",
+                        "processed_ridge_valley_clarity",
+                    ),
+                    "Sharpness change (%)": float(
+                        result_metrics.get("sharpness_improvement_pct", 0.0)
+                    ),
+                    "Edge change (%)": float(
+                        result_metrics.get("edge_improvement_pct", 0.0)
+                    ),
+                    "SSIM (preservation)": float(
+                        result_metrics.get("ssim", 0.0)
+                    ),
+                    "Processing time (ms)": float(record["processing_time_ms"]),
+                }
+            )
+        numeric_batch = pd.DataFrame(numeric_batch_rows)
+        quantitative_columns = [
+            "Contrast change (%)",
+            "RVC change (%)",
+            "Sharpness change (%)",
+            "Edge change (%)",
+            "SSIM (preservation)",
+            "Processing time (ms)",
+        ]
+        report_summary_rows = []
+        for column in quantitative_columns:
+            values = numeric_batch[column].astype(float)
+            report_summary_rows.append(
+                {
+                    "Measure": column,
+                    "Mean": f"{values.mean():.3f}",
+                    "SD": (
+                        f"{values.std(ddof=1):.3f}"
+                        if len(values) > 1
+                        else "N/A (n=1)"
+                    ),
+                    "n": len(values),
+                }
+            )
+        st.dataframe(
+            pd.DataFrame(report_summary_rows), width="stretch", hide_index=True
+        )
+        quality_chart = numeric_batch.set_index("Filename")[[
+            "Contrast change (%)",
+            "RVC change (%)",
+            "Sharpness change (%)",
+            "Edge change (%)",
+        ]]
+        st.bar_chart(quality_chart, stack=False)
+        st.caption(
+            "Per-image enhancement change. SSIM and runtime are shown separately because "
+            "they use different units and interpretations."
+        )
+        preservation_time_cols = st.columns(2)
+        preservation_time_cols[0].bar_chart(
+            numeric_batch.set_index("Filename")[["SSIM (preservation)"]]
+        )
+        preservation_time_cols[0].caption(
+            "SSIM structural preservation (closer to 1.000 is better)."
+        )
+        preservation_time_cols[1].bar_chart(
+            numeric_batch.set_index("Filename")[["Processing time (ms)"]]
+        )
+        preservation_time_cols[1].caption(
+            "Processing time by image (milliseconds)."
+        )
+
+        selection_order = [
+            "Proposed Improved RHLT",
+            "Traditional RHLT (safety fallback)",
+            "Original (quality fallback)",
+        ]
+        selection_counts = numeric_batch["Selected output"].value_counts().reindex(
+            selection_order, fill_value=0
+        )
+        selection_total = int(selection_counts.sum())
+        selection_summary = pd.DataFrame(
+            {
+                "Final output": selection_order,
+                "Count": [int(selection_counts[label]) for label in selection_order],
+                "Percentage": [
+                    (
+                        float(selection_counts[label]) / selection_total * 100.0
+                        if selection_total
+                        else 0.0
+                    )
+                    for label in selection_order
+                ],
+            }
+        )
+        st.markdown("**RHLT final-selection distribution**")
+        st.dataframe(
+            selection_summary,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Final output": st.column_config.TextColumn("Final output"),
+                "Count": st.column_config.NumberColumn("Count", format="%d"),
+                "Percentage": st.column_config.ProgressColumn(
+                    "Percentage",
+                    format="%.0f%%",
+                    min_value=0.0,
+                    max_value=100.0,
+                ),
+            },
+        )
+        st.caption(
+            "All three possible RHLT outcomes remain visible, including zero-count fallback "
+            "categories. Selection frequency identifies the returned candidate; it does not "
+            "prove superiority in every individual metric."
+        )
 
     csv_bytes = enriched_summary.to_csv(index=False).encode("utf-8")
     st.download_button(

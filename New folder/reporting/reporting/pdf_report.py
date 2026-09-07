@@ -12,7 +12,8 @@ import cv2
 import numpy as np
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.charts.legends import Legend
@@ -20,6 +21,7 @@ from reportlab.graphics.shapes import Drawing, String
 from reportlab.platypus import (
     Image,
     KeepTogether,
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -68,6 +70,47 @@ def _fmt(value: object, decimals: int = 3) -> str:
     return str(value)
 
 
+def _report_styles():
+    """Return compact styles shared by generated reports."""
+    styles = getSampleStyleSheet()
+    styles["Title"].textColor = colors.HexColor("#16324F")
+    styles["Heading2"].textColor = colors.HexColor("#1F4E78")
+    styles["Heading2"].spaceBefore = 10
+    styles["Heading2"].spaceAfter = 7
+    styles["BodyText"].leading = 13
+    styles.add(
+        ParagraphStyle(
+            name="SmallNote",
+            parent=styles["BodyText"],
+            fontSize=8,
+            leading=10,
+            textColor=colors.HexColor("#52606D"),
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="FigureCaption",
+            parent=styles["BodyText"],
+            fontSize=8,
+            leading=10,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#334E68"),
+        )
+    )
+    return styles
+
+
+def _draw_page_number(canvas, document) -> None:
+    canvas.saveState()
+    canvas.setStrokeColor(colors.HexColor("#D9E2EC"))
+    canvas.line(1.4 * cm, 1.05 * cm, A4[0] - 1.4 * cm, 1.05 * cm)
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColor(colors.HexColor("#627D98"))
+    canvas.drawString(1.4 * cm, 0.65 * cm, "Fingerprint Enhancement System")
+    canvas.drawRightString(A4[0] - 1.4 * cm, 0.65 * cm, f"Page {document.page}")
+    canvas.restoreState()
+
+
 def _grouped_bar_chart(
     title: str,
     categories: list[str],
@@ -75,6 +118,7 @@ def _grouped_bar_chart(
     *,
     value_min: float = 0.0,
     value_max: float | None = None,
+    bar_label_format: str | None = None,
 ) -> Drawing:
     """Build a compact, vector grouped bar chart for the PDF report."""
     drawing = Drawing(500, 235)
@@ -100,6 +144,12 @@ def _grouped_bar_chart(
     chart.valueAxis.gridStrokeWidth = 0.5
     chart.barSpacing = 1.5
     chart.groupSpacing = 8
+    if bar_label_format is not None:
+        chart.barLabelFormat = bar_label_format
+        chart.barLabels.fontName = "Helvetica-Bold"
+        chart.barLabels.fontSize = 7
+        chart.barLabels.fillColor = colors.HexColor("#16324F")
+        chart.barLabels.nudge = 6
     for index, (_, _, colour) in enumerate(series):
         chart.bars[index].fillColor = colour
         chart.bars[index].strokeColor = colour
@@ -147,7 +197,7 @@ def build_pdf_report(
         )
     )
     output = BytesIO()
-    styles = getSampleStyleSheet()
+    styles = _report_styles()
 
     document = SimpleDocTemplate(
         output,
@@ -157,11 +207,42 @@ def build_pdf_report(
         topMargin=1.4 * cm,
         bottomMargin=1.4 * cm,
     )
+    metadata_table = Table(
+        [
+            ["Algorithm", Paragraph(f"<b>{escape(algo)}</b>", styles["BodyText"])],
+            ["Input file", escape(filename)],
+            [
+                "Pipeline build",
+                escape(str(result.get("pipeline_build", "not recorded"))),
+            ],
+            [
+                "Generated",
+                datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
+            ],
+        ],
+        colWidths=[3.6 * cm, 13.6 * cm],
+    )
+    metadata_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#D9EAF7")),
+                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#BCCCDC")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]
+        )
+    )
     story = [
         Paragraph("Fingerprint Enhancement Report", styles["Title"]),
-        Paragraph(f"Algorithm: <b>{escape(algo)}</b>", styles["Normal"]),
-        Paragraph(f"Input file: {escape(filename)}", styles["Normal"]),
-        Paragraph(f"Generated: {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')}", styles["Normal"]),
+        Paragraph(
+            "Report-ready evidence for visual inspection, quantitative comparison and "
+            "reproducible algorithm evaluation.",
+            styles["SmallNote"],
+        ),
+        Spacer(1, 0.25 * cm),
+        metadata_table,
         Spacer(1, 0.4 * cm),
     ]
 
@@ -234,6 +315,53 @@ def build_pdf_report(
         )
         story.append(Spacer(1, 0.25 * cm))
 
+        config = result.get("config", {})
+        parameter_specs = [
+            ("RHLT PSF size", "psf_size"),
+            ("Topological charge", "topological_charge"),
+            ("Orientation block size", "block_size"),
+            ("Orientation bins", "orientation_bins"),
+            ("Gabor kernel size", "gabor_kernel_size"),
+            ("Gabor wavelength", "gabor_lambda"),
+            ("Maximum Gabor weight", "hybrid_gabor_max_weight"),
+            ("Frequency block size", "frequency_block_size"),
+            ("Selection tolerance", "selector_regression_tolerance"),
+        ]
+        parameter_rows = [["Parameter", "Recorded value"]] + [
+            [label, _fmt(config.get(key))] for label, key in parameter_specs
+        ]
+        parameter_table = Table(
+            parameter_rows, colWidths=[9.0 * cm, 5.0 * cm], repeatRows=1
+        )
+        parameter_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#486581")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#BCCCDC")),
+                    (
+                        "ROWBACKGROUNDS",
+                        (0, 1),
+                        (-1, -1),
+                        [colors.white, colors.HexColor("#F0F4F8")],
+                    ),
+                    ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+        story.append(Paragraph("Recorded RHLT Parameters", styles["Heading2"]))
+        story.append(parameter_table)
+        story.append(Spacer(1, 0.35 * cm))
+        story.append(PageBreak())
+        story.append(
+            Paragraph(
+                "Traditional vs Proposed Quantitative Comparison", styles["Heading2"]
+            )
+        )
+
         candidate_rows = [[
             "Metric",
             "Original",
@@ -285,6 +413,13 @@ def build_pdf_report(
             ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ]))
         story.append(candidate_table)
+        story.append(
+            Paragraph(
+                "SSIM uses the original input as the 1.000 reference. It measures structural "
+                "preservation and must not be interpreted as a percentage enhancement gain.",
+                styles["SmallNote"],
+            )
+        )
         story.append(Spacer(1, 0.45 * cm))
 
         traditional_changes = [
@@ -315,18 +450,38 @@ def build_pdf_report(
 
         traditional_score = float(result.get("traditional_quality_score", 0.0)) * 100.0
         improved_score = float(result.get("improved_quality_score", 0.0)) * 100.0
+        ssim_delta_pp = (improved_ssim - traditional_ssim) * 100.0
+        score_delta = improved_score - traditional_score
+        delta_values = [ssim_delta_pp, score_delta]
+        delta_min = min(0.0, min(delta_values) * 1.2)
+        delta_max = max(0.1, max(delta_values) * 1.25)
         story.append(
             _grouped_bar_chart(
-                "Structural Preservation and Balanced Quality (%)",
-                ["SSIM", "Quality score"],
+                "Proposed Structural-Quality Advantage (percentage points)",
+                ["SSIM delta", "Quality-score delta"],
                 [
-                    ("Traditional RHLT", [traditional_ssim * 100.0, traditional_score], chart_blue),
-                    ("Proposed Improved", [improved_ssim * 100.0, improved_score], chart_green),
+                    ("Proposed - Traditional", delta_values, chart_green),
                 ],
-                value_max=105.0,
+                value_min=delta_min,
+                value_max=delta_max,
+                bar_label_format="%+.2f pp",
             )
         )
-        story.append(Spacer(1, 0.35 * cm))
+        story.append(Spacer(1, 0.2 * cm))
+        story.append(
+            Paragraph(
+                "Delta-chart interpretation: positive values favour Proposed Improved RHLT. "
+                f"For this image, the SSIM difference was {improved_ssim - traditional_ssim:+.3f} "
+                f"({ssim_delta_pp:+.2f} percentage points) and the balanced-quality difference "
+                f"was {(improved_score - traditional_score) / 100.0:+.4f} "
+                f"({score_delta:+.2f} percentage points). These are small absolute advantages "
+                "and do not establish statistical significance. Traditional RHLT may still "
+                "produce marginally stronger enhancement measurements, while the Proposed "
+                "method is selected when it preserves structure and passes the safety checks.",
+                styles["BodyText"],
+            )
+        )
+        story.append(PageBreak())
 
     # Section 2: Image comparison
     with TemporaryDirectory() as tmp_dir:
@@ -506,7 +661,11 @@ def build_pdf_report(
             Paragraph("Detailed Metrics: Original vs Enhanced", styles["Heading2"]),
             comp_table,
         ]))
-        document.build(story)
+        document.build(
+            story,
+            onFirstPage=_draw_page_number,
+            onLaterPages=_draw_page_number,
+        )
     return output.getvalue()
 
 def build_comparison_report(

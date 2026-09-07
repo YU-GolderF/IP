@@ -156,13 +156,15 @@ def _grouped_bar_chart(
     drawing.add(chart)
 
     legend = Legend()
-    legend.x = 315
-    legend.y = 210
+    legend.x = 45
+    legend.y = 201
     legend.fontName = "Helvetica"
     legend.fontSize = 7
     legend.dx = 7
     legend.dy = 7
-    legend.deltax = 85
+    legend.deltax = 110
+    legend.columnMaximum = 1
+    legend.alignment = "left"
     legend.colorNamePairs = [(colour, label) for label, _, colour in series]
     drawing.add(legend)
     return drawing
@@ -194,6 +196,19 @@ def build_pdf_report(
             "improved_rhlt",
             "traditional_rhlt_metrics",
             "improved_rhlt_metrics",
+        )
+    )
+    is_unsharp_report = all(
+        key in result
+        for key in (
+            "conventional_unsharp",
+            "adaptive_unsharp",
+            "polynomial_unsharp",
+            "sobel_sharpening",
+            "conventional_unsharp_metrics",
+            "adaptive_unsharp_metrics",
+            "polynomial_unsharp_metrics",
+            "sobel_sharpening_metrics",
         )
     )
     output = BytesIO()
@@ -356,6 +371,7 @@ def build_pdf_report(
         story.append(parameter_table)
         story.append(Spacer(1, 0.35 * cm))
         story.append(PageBreak())
+
         story.append(
             Paragraph(
                 "Traditional vs Proposed Quantitative Comparison", styles["Heading2"]
@@ -483,6 +499,201 @@ def build_pdf_report(
         )
         story.append(PageBreak())
 
+    if is_unsharp_report:
+        story.append(Paragraph("Unsharp Masking Final Selection", styles["Heading2"]))
+        story.append(
+            Paragraph(
+                "The complete research workflow applies Conventional UM, Adaptive UM, "
+                "Nonlinear Polynomial UM and Sobel sharpening independently to the same "
+                "preprocessed fingerprint. Nonlinear Polynomial UM is the final selected "
+                "enhancement used for the post-processing and feature-analysis stages.",
+                styles["BodyText"],
+            )
+        )
+        story.append(Spacer(1, 0.2 * cm))
+
+        parameter_rows = [
+            ["Parameter", "Recorded value"],
+            ["Conventional UM sharpening weight", "lambda = 1.0"],
+            ["Sobel sharpening gain", "0.5"],
+            ["Polynomial UM enhancement weight", "lambda = 0.00085"],
+            ["Polynomial UM polynomial constant", "k = 400"],
+            ["Foreground segmentation block size", "16 x 16 pixels"],
+        ]
+        parameter_table = Table(
+            parameter_rows, colWidths=[9.2 * cm, 5.2 * cm], repeatRows=1
+        )
+        parameter_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#486581")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#BCCCDC")),
+                    (
+                        "ROWBACKGROUNDS",
+                        (0, 1),
+                        (-1, -1),
+                        [colors.white, colors.HexColor("#F0F4F8")],
+                    ),
+                    ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+        story.append(Paragraph("Recorded Unsharp Masking Parameters", styles["Heading2"]))
+        story.append(parameter_table)
+        story.append(PageBreak())
+
+        candidate_specs = [
+            (
+                "Conventional UM",
+                result["conventional_unsharp_metrics"],
+                int(result.get("conventional_unsharp_minutiae", 0)),
+                float(result.get("conventional_unsharp_time_ms", 0.0)),
+                colors.HexColor("#1565C0"),
+            ),
+            (
+                "Adaptive UM",
+                result["adaptive_unsharp_metrics"],
+                int(result.get("adaptive_unsharp_minutiae", 0)),
+                float(result.get("adaptive_unsharp_time_ms", 0.0)),
+                colors.HexColor("#64B5F6"),
+            ),
+            (
+                "Polynomial UM",
+                result["polynomial_unsharp_metrics"],
+                int(result.get("polynomial_unsharp_minutiae", 0)),
+                float(result.get("polynomial_unsharp_time_ms", 0.0)),
+                colors.HexColor("#2E9D69"),
+            ),
+            (
+                "Sobel",
+                result["sobel_sharpening_metrics"],
+                int(result.get("sobel_sharpening_minutiae", 0)),
+                float(result.get("sobel_sharpening_time_ms", 0.0)),
+                colors.HexColor("#F28E2B"),
+            ),
+        ]
+
+        def candidate_rvc_change(candidate_metrics: dict) -> float:
+            return _percentage_change(
+                candidate_metrics,
+                "original_ridge_valley_clarity",
+                "processed_ridge_valley_clarity",
+            )
+
+        candidate_rows = [[
+            "Metric", "Conventional", "Adaptive", "Polynomial", "Sobel"
+        ]]
+        candidate_rows.extend(
+            [
+                [
+                    "CII",
+                    *[f"{float(m.get('cii', 1.0)):.3f}" for _, m, _, _, _ in candidate_specs],
+                ],
+                [
+                    "Sharpness change",
+                    *[f"{float(m.get('sharpness_improvement_pct', 0.0)):+.1f}%" for _, m, _, _, _ in candidate_specs],
+                ],
+                [
+                    "Ridge-Valley Clarity change",
+                    *[f"{candidate_rvc_change(m):+.1f}%" for _, m, _, _, _ in candidate_specs],
+                ],
+                [
+                    "Edge clarity change",
+                    *[f"{float(m.get('edge_improvement_pct', 0.0)):+.1f}%" for _, m, _, _, _ in candidate_specs],
+                ],
+                [
+                    "SSIM against input",
+                    *[f"{float(m.get('ssim', 0.0)):.3f}" for _, m, _, _, _ in candidate_specs],
+                ],
+                ["Detected minutiae", *[str(count) for _, _, count, _, _ in candidate_specs]],
+                ["Filter time (ms)", *[f"{time_ms:.2f}" for _, _, _, time_ms, _ in candidate_specs]],
+            ]
+        )
+        candidate_table = Table(
+            candidate_rows,
+            colWidths=[5.0 * cm, 3.0 * cm, 3.0 * cm, 3.0 * cm, 2.7 * cm],
+            repeatRows=1,
+        )
+        candidate_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2B4590")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
+                    ("FONTNAME", (3, 1), (3, -1), "Helvetica-Bold"),
+                    ("BACKGROUND", (3, 1), (3, -1), colors.HexColor("#E4F4EA")),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("ROWBACKGROUNDS", (0, 1), (2, -1), [colors.white, colors.HexColor("#F3F5FA")]),
+                    ("ROWBACKGROUNDS", (4, 1), (4, -1), [colors.white, colors.HexColor("#F3F5FA")]),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+        story.append(Paragraph("Unsharp Masking Candidate Comparison", styles["Heading2"]))
+        story.append(candidate_table)
+        story.append(
+            Paragraph(
+                "All values are calculated for the selected fingerprint using the same "
+                "preprocessing settings and foreground mask. Filter time records the "
+                "enhancement operation only and excludes the complete pipeline time.",
+                styles["SmallNote"],
+            )
+        )
+        story.append(Spacer(1, 0.3 * cm))
+
+        enhancement_categories = ["Contrast", "RVC", "Sharpness", "Edge"]
+        enhancement_series = []
+        enhancement_values = []
+        for label, candidate_metrics, _, _, colour in candidate_specs:
+            values = [
+                (float(candidate_metrics.get("cii", 1.0)) - 1.0) * 100.0,
+                candidate_rvc_change(candidate_metrics),
+                float(candidate_metrics.get("sharpness_improvement_pct", 0.0)),
+                float(candidate_metrics.get("edge_improvement_pct", 0.0)),
+            ]
+            enhancement_values.extend(values)
+            enhancement_series.append((label, values, colour))
+        story.append(
+            _grouped_bar_chart(
+                "Candidate Enhancement Change vs Original (%)",
+                enhancement_categories,
+                enhancement_series,
+                value_min=min(0.0, min(enhancement_values, default=0.0) * 1.15),
+            )
+        )
+        story.append(Spacer(1, 0.2 * cm))
+
+        structure_series = [
+            (
+                label,
+                [float(m.get("cii", 1.0)), float(m.get("ssim", 0.0))],
+                colour,
+            )
+            for label, m, _, _, colour in candidate_specs
+        ]
+        structure_max = max(
+            (value for _, values, _ in structure_series for value in values),
+            default=1.0,
+        )
+        story.append(
+            _grouped_bar_chart(
+                "Contrast Improvement and Structural Similarity",
+                ["CII", "SSIM"],
+                structure_series,
+                value_min=0.0,
+                value_max=max(1.1, structure_max * 1.15),
+            )
+        )
+        story.append(PageBreak())
+
     # Section 2: Image comparison
     with TemporaryDirectory() as tmp_dir:
         tmp = Path(tmp_dir)
@@ -525,6 +736,52 @@ def build_pdf_report(
                         Paragraph(traditional_caption, styles["BodyText"]),
                         Paragraph(improved_caption, styles["BodyText"]),
                     ],
+                ],
+                colWidths=[5.85 * cm, 5.85 * cm, 5.85 * cm],
+            )
+        elif is_unsharp_report:
+            visual_candidates = [
+                ("original", original, "Original fingerprint"),
+                (
+                    "conventional_unsharp",
+                    result["conventional_unsharp"],
+                    "Conventional UM",
+                ),
+                (
+                    "sobel_sharpening",
+                    result["sobel_sharpening"],
+                    "Sobel sharpening",
+                ),
+                (
+                    "adaptive_unsharp",
+                    result["adaptive_unsharp"],
+                    "Adaptive UM",
+                ),
+                (
+                    "polynomial_unsharp",
+                    result["polynomial_unsharp"],
+                    "Polynomial UM - Final Selected",
+                ),
+            ]
+            visual_cells = []
+            for key, array, label in visual_candidates:
+                array = np.asarray(array)
+                path = save_img(key, array)
+                visual_cells.append(
+                    (
+                        _report_image(path, array, 5.3 * cm, 5.0 * cm),
+                        Paragraph(label, styles["BodyText"]),
+                    )
+                )
+            visual_cells.append(
+                (Paragraph("", styles["BodyText"]), Paragraph("", styles["BodyText"]))
+            )
+            image_table = Table(
+                [
+                    [cell[0] for cell in visual_cells[:3]],
+                    [cell[1] for cell in visual_cells[:3]],
+                    [cell[0] for cell in visual_cells[3:6]],
+                    [cell[1] for cell in visual_cells[3:6]],
                 ],
                 colWidths=[5.85 * cm, 5.85 * cm, 5.85 * cm],
             )
@@ -603,6 +860,57 @@ def build_pdf_report(
                 ]))
                 story.append(Paragraph("Diagnostic Outputs", styles["Heading2"]))
                 story.append(diagnostics_table)
+                story.append(Spacer(1, 0.5 * cm))
+        elif is_unsharp_report:
+            diagnostics = []
+            for key, label in (
+                ("orientation_visualisation", "Ridge orientation field"),
+                ("ridge_binary", "Binary ridge image"),
+                ("skeleton", "Skeleton image"),
+                ("minutiae_overlay", "Minutiae overlay"),
+            ):
+                array = result.get(key)
+                if array is None:
+                    continue
+                array = np.asarray(array)
+                path = save_img(key, array)
+                diagnostics.append(
+                    (
+                        _report_image(path, array, 8.0 * cm, 4.3 * cm),
+                        Paragraph(label, styles["BodyText"]),
+                    )
+                )
+            if diagnostics:
+                while len(diagnostics) < 4:
+                    diagnostics.append(
+                        (Paragraph("", styles["BodyText"]), Paragraph("", styles["BodyText"]))
+                    )
+                diagnostics_table = Table(
+                    [
+                        [diagnostics[0][0], diagnostics[1][0]],
+                        [diagnostics[0][1], diagnostics[1][1]],
+                        [diagnostics[2][0], diagnostics[3][0]],
+                        [diagnostics[2][1], diagnostics[3][1]],
+                    ],
+                    colWidths=[8.8 * cm, 8.8 * cm],
+                )
+                diagnostics_table.setStyle(
+                    TableStyle(
+                        [
+                            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                        ]
+                    )
+                )
+                story.append(
+                    KeepTogether(
+                        [
+                            Paragraph("Final Pipeline Diagnostic Outputs", styles["Heading2"]),
+                            diagnostics_table,
+                        ]
+                    )
+                )
                 story.append(Spacer(1, 0.5 * cm))
 
         # Section 3: Comparison metrics table (Original | Enhanced | Change)

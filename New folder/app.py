@@ -47,6 +47,8 @@ run_ablation = rhlt_pipeline_module.run_ablation
 build_pdf_report = pdf_report_module.build_pdf_report
 build_comparison_report = pdf_report_module.build_comparison_report
 encode_png = pdf_report_module.encode_png
+balanced_quality_score = pdf_report_module.balanced_quality_score
+quality_score_components = pdf_report_module.quality_score_components
 from core import (
     CalibrationConfig,
     DEGRADATION_PRESETS,
@@ -61,7 +63,7 @@ st.set_page_config(
     page_title="Fingerprint Enhancement System", page_icon="🔬", layout="wide"
 )
 st.title("Fingerprint Enhancement System")
-APP_BUILD = "rhlt-primary-quality-adaptive-v3.8-2026-09-03"
+APP_BUILD = "report-ready-comparison-v3.8-2026-09-07"
 st.caption(
     "Shared preprocessing, calibration, batch ingestion and quality metrics with "
     "pluggable team algorithms. RHLT Ridge Flow Restoration is currently available."
@@ -199,17 +201,14 @@ def selected_output_label(result: dict) -> str:
 
 def comparison_quality_score(metrics: dict) -> float:
     """Balanced no-reference score for the multi-algorithm UI (0..100)."""
-    original_rvc = max(float(metrics.get("original_ridge_valley_clarity", 0.0)), 1e-6)
-    processed_rvc = float(metrics.get("processed_ridge_valley_clarity", 0.0))
-    original_edge = max(float(metrics.get("original_edge_clarity", 0.0)), 1e-6)
-    processed_edge = float(metrics.get("processed_edge_clarity", 0.0))
-    contrast = np.clip(float(metrics.get("cii", 1.0)) / 1.5, 0.0, 1.0)
-    rvc = np.clip((processed_rvc / original_rvc) / 1.5, 0.0, 1.0)
-    edge = np.clip((processed_edge / original_edge) / 1.5, 0.0, 1.0)
-    structural = np.clip(float(metrics.get("ssim", 0.0)), 0.0, 1.0)
-    return float(
-        100.0 * (0.15 * contrast + 0.25 * rvc + 0.20 * edge + 0.40 * structural)
-    )
+    return balanced_quality_score(metrics)
+
+
+def metric_percentage_change(metrics: dict, original_key: str, processed_key: str) -> float:
+    """Return a signed percentage change while safely handling a zero reference."""
+    original = float(metrics.get(original_key, 0.0))
+    processed = float(metrics.get(processed_key, 0.0))
+    return (processed - original) / max(abs(original), 1e-9) * 100.0
 
 
 @st.cache_data(show_spinner=False)
@@ -533,6 +532,12 @@ with overview_tab:
         help="Foreground Laplacian variance improvement — fingerprint-specific sharpness.",
     )
 
+    st.caption(
+        "**How to read SSIM:** the original image is the 1.000 reference. The displayed "
+        "value measures structural preservation after enhancement; it is not an improvement "
+        "percentage. Values closer to 1.000 indicate less structural distortion."
+    )
+
     st.divider()
 
     # --- Side-by-side image comparison ---
@@ -574,7 +579,6 @@ with overview_tab:
                 clamp=True,
                 use_container_width=True,
             )
-
     elif selected_algorithm == "DCT-based Contextual Filtering":
         st.caption(
             "Fingerprint-evidence comparison. Each candidate uses the same input and the same downstream evaluation layer."
@@ -611,10 +615,7 @@ with overview_tab:
                 }
             )
         st.dataframe(pd.DataFrame(evidence_rows), width="stretch", hide_index=True)
-        st.info(
-            "For ridge clarity, look for positive CII / Sharpness / RVC changes together with a "
-            "high SSIM and a visually continuous orientation field. A single higher sharpness value is not sufficient evidence."
-        )
+        
 
     elif selected_algorithm == "Unsharp Masking":
         original_column, conventional_column, adaptive_column, polynomial_column = (
@@ -1061,46 +1062,22 @@ with pipeline_tab:
         "They are intended for technical inspection and debugging — not for evaluating enhancement quality."
     )
     stages = selected["preprocessing_stages"]
-    if selected_algorithm == "DCT-based Contextual Filtering":
-        st.caption(
-            "Algorithm 2 stages are independent DCT contextual filtering. Mask, orientation and skeleton are "
-            "post-output evaluation diagnostics; they are not fed back into the DCT method."
-        )
-        stage_images = [
-            ("Grayscale input", stages["grayscale"]),
-            ("2-D wavelet branch · Improved Eq. (14)", stages["wavelet_branch"]),
-            ("Finite-ridgelet branch · Improved Eq. (14)", stages["ridgelet_branch"]),
-            ("Wavelet-domain fusion", stages["fusion_pre_wiener"]),
-            ("Final fusion + Wiener", stages["enhanced"]),
-            ("Fingerprint foreground mask", selected["foreground_mask"].astype("uint8") * 255),
-            ("Orientation evaluation", selected["orientation_visualisation"]),
-            (f"Skeleton (minutiae: {int(metrics.get('minutiae_total', 0))})", selected["skeleton"].astype("uint8") * 255),
-        ]
-        # Replace the legacy Algorithm 2 labels with the actual independent
-        # DCT stages. The map/skeleton items remain downstream diagnostics.
-        stage_images = [
-            ("Grayscale input", stages["grayscale"]),
-            ("Intensity normalisation", stages["normalised"]),
-            ("DCT contextual reconstruction", stages["dct_contextual"]),
-            ("Final ROI contrast restoration", stages["enhanced"]),
-            ("Fingerprint foreground mask", selected["foreground_mask"].astype("uint8") * 255),
-            ("DCT local orientation map", diagnostic_map_to_uint8(selected["dct_orientation_map"], selected["foreground_mask"])),
-            ("DCT local ridge frequency map", diagnostic_map_to_uint8(selected["frequency_map"], selected["foreground_mask"])),
-            ("DCT confidence map", diagnostic_map_to_uint8(selected["confidence_map"], selected["foreground_mask"])),
-            ("Evaluation orientation", selected["orientation_visualisation"]),
-            (f"Skeleton (minutiae: {int(metrics.get('minutiae_total', 0))})", selected["skeleton"].astype("uint8") * 255),
-        ]
-    else:
-        stage_images = [
-            ("Grayscale", stages["grayscale"]),
-            ("Gaussian denoised", stages["gaussian_denoised"]),
-            ("Median / denoised", stages["denoised"]),
-            ("Intensity normalised", stages["normalised"]),
-            ("CLAHE enhanced", stages["enhanced"]),
-            ("Fingerprint foreground mask", selected["foreground_mask"].astype("uint8") * 255),
-            ("Ridge flow restored", selected["ridge_restored"]),
-            (f"Skeleton (minutiae: {int(metrics.get('minutiae_total', 0))})", selected["skeleton"].astype("uint8") * 255),
-        ]
+    stage_images = [
+        ("Grayscale", stages["grayscale"]),
+        ("Gaussian denoised", stages["gaussian_denoised"]),
+        ("Median / denoised", stages["denoised"]),
+        ("Intensity normalised", stages["normalised"]),
+        ("CLAHE enhanced", stages["enhanced"]),
+        (
+            "Fingerprint foreground mask",
+            (selected["foreground_mask"].astype("uint8") * 255),
+        ),
+        ("Ridge flow restored", selected["ridge_restored"]),
+        (
+            f"Skeleton (minutiae: {int(metrics.get('minutiae_total', 0))})",
+            (selected["skeleton"].astype("uint8") * 255),
+        ),
+    ]
     for start in range(0, len(stage_images), 4):
         columns = st.columns(4)
         for column, (label, image) in zip(columns, stage_images[start : start + 4]):
@@ -1171,6 +1148,43 @@ with rhlt_internals_tab:
             "Improved fusion applied",
             f"{selected.get('mean_fusion_weight', 0.0) * 100.0:.1f}% avg",
         )
+
+        score_explanation = st.expander(
+            "How the RHLT candidate decision is made", expanded=False
+        )
+        score_explanation.markdown(
+            "The RHLT selector compares Traditional and Proposed candidates using the same "
+            "input. It prioritises ridge structure and rejects unsafe candidates before the "
+            "regression tolerance is applied. A slightly lower sharpness value therefore does "
+            "not automatically make the Proposed candidate worse."
+        )
+        score_components = selected.get("quality_score_components", {})
+        if score_components:
+            component_rows = []
+            for candidate, components in score_components.items():
+                if not isinstance(components, dict):
+                    continue
+                component_rows.append(
+                    {
+                        "Candidate": str(candidate).replace("_", " ").title(),
+                        **{
+                            str(key).replace("_", " ").title(): (
+                                f"{float(value):.4f}"
+                                if isinstance(value, (int, float, np.number))
+                                else str(value)
+                            )
+                            for key, value in components.items()
+                            if key not in {"safe"}
+                        },
+                        "Structural safety": (
+                            "Passed" if components.get("safe", True) else "Failed"
+                        ),
+                    }
+                )
+            if component_rows:
+                score_explanation.dataframe(
+                    pd.DataFrame(component_rows), width="stretch", hide_index=True
+                )
 
         # Row 1: RHLT diagnostics
         rhlt_diagnostics = st.expander(
@@ -1270,6 +1284,56 @@ with rhlt_internals_tab:
             candidate_details.dataframe(
                 pd.DataFrame(cand_data), width="stretch", hide_index=True
             )
+
+            st.subheader("Report-ready RHLT comparison")
+            st.caption(
+                "This compact figure and the paragraph below are designed for Section 4.1.2.1. "
+                "Use the browser download menu to save the chart, or reproduce the values from "
+                "the downloadable report/CSV."
+            )
+            traditional_changes = {
+                "Contrast": (float(tm.get("cii", 1.0)) - 1.0) * 100.0,
+                "RVC": metric_percentage_change(
+                    tm,
+                    "original_ridge_valley_clarity",
+                    "processed_ridge_valley_clarity",
+                ),
+                "Sharpness": float(tm.get("sharpness_improvement_pct", 0.0)),
+                "Edge clarity": float(tm.get("edge_improvement_pct", 0.0)),
+            }
+            improved_changes = {
+                "Contrast": (float(im.get("cii", 1.0)) - 1.0) * 100.0,
+                "RVC": metric_percentage_change(
+                    im,
+                    "original_ridge_valley_clarity",
+                    "processed_ridge_valley_clarity",
+                ),
+                "Sharpness": float(im.get("sharpness_improvement_pct", 0.0)),
+                "Edge clarity": float(im.get("edge_improvement_pct", 0.0)),
+            }
+            report_chart = pd.DataFrame(
+                {
+                    "Traditional RHLT": traditional_changes,
+                    "Proposed Improved RHLT": improved_changes,
+                }
+            )
+            st.bar_chart(report_chart, stack=False)
+            st.caption(
+                "Figure-ready chart: percentage change from the same original input. SSIM is "
+                "excluded because it is a preservation index, not a percentage gain."
+            )
+            score_delta = float(selected.get("improved_quality_score", 0.0)) - float(
+                selected.get("traditional_quality_score", 0.0)
+            )
+            st.markdown(
+                "**Result statement (copy-ready, UK English):** "
+                f"For **{selected_name}**, Traditional RHLT produced marginally stronger "
+                "enhancement measurements, while Proposed Improved RHLT retained "
+                f"slightly greater structural similarity ({im.get('ssim', 0.0):.3f} versus "
+                f"{tm.get('ssim', 0.0):.3f}). The Proposed candidate passed the structural "
+                f"safety checks and achieved a quality-score difference of {score_delta:+.4f}; "
+                f"therefore, **{selected_output_label(selected)}** was returned as the final output."
+            )
     else:
         st.info("RHLT Algorithm Internals is specific to the RHLT algorithm.")
 
@@ -1341,8 +1405,8 @@ with dashboard_tab:
                 "Sharpness Δ%": f"{result_metrics.get('sharpness_improvement_pct', 0.0):+.1f}%",
                 "Edge Clarity Δ%": f"{result_metrics.get('edge_improvement_pct', 0.0):+.1f}%",
                 "SSIM": f"{result_metrics.get('ssim', 0.0):.3f}",
-                "SSIM Δ vs input": (
-                    f"{(float(result_metrics.get('ssim', 0.0)) - 1.0) * 100.0:+.1f}%"
+                "Structure retained (%)": (
+                    f"{float(result_metrics.get('ssim', 0.0)) * 100.0:.1f}%"
                 ),
                 "Orientation Coherence": f"{result_metrics.get('mean_orientation_coherence', 0.0):.3f}",
                 "Minutiae Total": int(result_metrics.get("minutiae_total", 0)),
@@ -1377,9 +1441,10 @@ with dashboard_tab:
     batch_cards = st.columns(4)
     batch_cards[0].metric("Processed", len(batch_records))
     batch_cards[1].metric(
-        "Average SSIM",
+        "Average structural preservation (SSIM)",
         f"{mean_batch_ssim:.3f}",
-        delta=f"{(mean_batch_ssim - 1.0) * 100.0:+.1f}% vs input",
+        delta=f"{mean_batch_ssim * 100.0:.1f}% structure retained",
+        delta_color="off",
         help=(
             "SSIM compares the enhanced image with its input. The input reference is "
             "1.000, so this delta measures structural change/preservation, not a quality gain."
@@ -1388,18 +1453,104 @@ with dashboard_tab:
     batch_cards[2].metric("Average RVC change", f"{np.mean(batch_rvc):+.1f}%")
     batch_cards[3].metric("Average time", f"{np.mean(batch_time):.1f} ms")
 
+    st.caption(
+        f"Dataset scope: **{len(batch_records)} result(s) currently summarised** from "
+        f"**{len(loaded_images)} available application image(s)**. The separate controlled "
+        "degradation experiment uses 13 clean BMP references and is not mixed into this table."
+    )
+
     concise_columns = [
         "Filename",
         "Selected output",
         "CII (contrast)",
         "Sharpness Δ%",
         "SSIM",
-        "SSIM Δ vs input",
+        "Structure retained (%)",
         "Time (ms)",
     ]
     st.dataframe(enriched_summary[concise_columns], width="stretch", hide_index=True)
     batch_details = st.expander("View complete batch metrics", expanded=False)
     batch_details.dataframe(enriched_summary, width="stretch", hide_index=True)
+
+    st.subheader("Report-ready batch evidence")
+    st.caption(
+        "Mean ± sample standard deviation is reported when at least two images have been "
+        "processed. Run the full batch before using these values in Chapter 4."
+    )
+    numeric_batch_rows = []
+    for record in batch_records:
+        result = record["result"]
+        m = result["metrics"]
+        numeric_batch_rows.append(
+            {
+                "Filename": record["filename"],
+                "Selected output": selected_output_label(result),
+                "Contrast change (%)": (float(m.get("cii", 1.0)) - 1.0) * 100.0,
+                "RVC change (%)": metric_percentage_change(
+                    m,
+                    "original_ridge_valley_clarity",
+                    "processed_ridge_valley_clarity",
+                ),
+                "Sharpness change (%)": float(m.get("sharpness_improvement_pct", 0.0)),
+                "Edge change (%)": float(m.get("edge_improvement_pct", 0.0)),
+                "SSIM (preservation)": float(m.get("ssim", 0.0)),
+                "Processing time (ms)": float(record["processing_time_ms"]),
+            }
+        )
+    numeric_batch = pd.DataFrame(numeric_batch_rows)
+    quantitative_columns = [
+        "Contrast change (%)",
+        "RVC change (%)",
+        "Sharpness change (%)",
+        "Edge change (%)",
+        "SSIM (preservation)",
+        "Processing time (ms)",
+    ]
+    report_summary_rows = []
+    for column in quantitative_columns:
+        values = numeric_batch[column].astype(float)
+        report_summary_rows.append(
+            {
+                "Measure": column,
+                "Mean": f"{values.mean():.3f}",
+                "SD": f"{values.std(ddof=1):.3f}" if len(values) > 1 else "N/A (n=1)",
+                "n": len(values),
+            }
+        )
+    st.dataframe(
+        pd.DataFrame(report_summary_rows), width="stretch", hide_index=True
+    )
+    quality_chart = numeric_batch.set_index("Filename")[[
+        "Contrast change (%)",
+        "RVC change (%)",
+        "Sharpness change (%)",
+        "Edge change (%)",
+    ]]
+    st.bar_chart(quality_chart, stack=False)
+    st.caption(
+        "Figure-ready chart: per-image enhancement change. SSIM and runtime are kept "
+        "separate because they use different units and interpretations."
+    )
+    preservation_time_cols = st.columns(2)
+    preservation_time_cols[0].bar_chart(
+        numeric_batch.set_index("Filename")[["SSIM (preservation)"]]
+    )
+    preservation_time_cols[0].caption(
+        "SSIM structural preservation (closer to 1.000 is better)."
+    )
+    preservation_time_cols[1].bar_chart(
+        numeric_batch.set_index("Filename")[["Processing time (ms)"]]
+    )
+    preservation_time_cols[1].caption("Processing time by image (milliseconds).")
+    if selected_algorithm == "RHLT":
+        selection_counts = (
+            numeric_batch["Selected output"].value_counts().rename("Count").to_frame()
+        )
+        st.markdown("**RHLT final-selection count**")
+        st.bar_chart(selection_counts, horizontal=True, stack=False)
+        st.caption(
+            "This count makes the Proposed/Traditional fallback frequency explicit for the report."
+        )
     csv_bytes = enriched_summary.to_csv(index=False).encode("utf-8")
     st.download_button(
         "⬇️ Download metrics CSV", csv_bytes, "fingerprint_metrics.csv", "text/csv"
@@ -1840,6 +1991,34 @@ with comparison_tab:
         "of benchmarking multiple techniques."
     )
 
+    score_help = st.expander("How the shared quality score is calculated", expanded=False)
+    score_help.markdown(
+        "All algorithms are evaluated on the same calibrated input. Four measurements are "
+        "normalised to 0–1 before weighting, preventing raw RVC or edge magnitudes from "
+        "dominating the ranking. The score is a transparent decision aid, not a ground-truth "
+        "recognition accuracy measurement."
+    )
+    score_help.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Component": name,
+                    "Weight": f"{weight * 100:.0f}%",
+                    "Normalisation": (
+                        "clip(CII / 1.5, 0, 1)"
+                        if name == "Contrast"
+                        else "clip(output/input ratio / 1.5, 0, 1)"
+                        if name in {"Ridge-valley clarity", "Edge clarity"}
+                        else "SSIM clipped to 0–1"
+                    ),
+                }
+                for name, weight in pdf_report_module.QUALITY_SCORE_WEIGHTS.items()
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
     run_comparison = st.checkbox(
         "Run multi-algorithm comparison for the selected image",
         value=False,
@@ -1943,6 +2122,36 @@ with comparison_tab:
                 lambda value: f"{value:.1f}/100"
             )
             st.dataframe(lb_df, width="stretch", hide_index=True)
+
+            st.subheader("Report-ready normalised comparison")
+            st.caption(
+                "Component values are shown on the same 0–100 scale. This chart can be "
+                "placed directly in the group comparison section of the report."
+            )
+            component_chart_rows = {}
+            runtime_rows = {}
+            for algo_name, result in comparison_results.items():
+                component_chart_rows[algo_name] = {
+                    name: value * 100.0
+                    for name, value in quality_score_components(result["metrics"]).items()
+                }
+                runtime_rows[algo_name] = float(result.get("processing_time_ms", 0.0))
+            component_chart = pd.DataFrame(component_chart_rows).T
+            st.bar_chart(component_chart, stack=False)
+            st.caption(
+                "Normalised quality components (higher is better). The final score applies "
+                "15% Contrast, 25% RVC, 20% Edge clarity and 40% Structural preservation."
+            )
+            st.bar_chart(
+                pd.DataFrame.from_dict(
+                    runtime_rows, orient="index", columns=["Processing time (ms)"]
+                ),
+                horizontal=True,
+            )
+            st.caption(
+                "Runtime is displayed separately because lower is better and milliseconds "
+                "must not share a quality-score axis."
+            )
 
             comparison_details = st.expander(
                 "View complete algorithm metrics", expanded=False

@@ -1400,6 +1400,241 @@ with dashboard_tab:
     st.dataframe(enriched_summary[concise_columns], width="stretch", hide_index=True)
     batch_details = st.expander("View complete batch metrics", expanded=False)
     batch_details.dataframe(enriched_summary, width="stretch", hide_index=True)
+
+    # Live report evidence for the Unsharp Masking experiments. These charts are
+    # generated from the current in-memory pipeline results rather than from
+    # bundled/static report images, so a tutor can reproduce them by processing
+    # the same batch in the application.
+    if selected_algorithm == "Unsharp Masking":
+        st.divider()
+        st.subheader("Unsharp Masking experimental evidence")
+        st.caption(
+            f"Generated live from `{selected.get('pipeline_build', 'unknown')}` using "
+            f"{len(batch_records)} processed fingerprint image(s). Hover over a bar "
+            "to inspect its exact value."
+        )
+        if len(loaded_images) > 1 and not batch_is_ready:
+            st.info(
+                f"The charts currently show {selected_name} only. Select "
+                f"**Process all {len(loaded_images)} fingerprints** above to reproduce "
+                "the dataset-level report figures."
+            )
+
+        evidence_rows = []
+        candidate_definitions = [
+            (
+                "Conventional UM",
+                "conventional_unsharp_metrics",
+                "conventional_unsharp_minutiae",
+                "conventional_unsharp_time_ms",
+            ),
+            (
+                "Adaptive UM",
+                "adaptive_unsharp_metrics",
+                "adaptive_unsharp_minutiae",
+                "adaptive_unsharp_time_ms",
+            ),
+            (
+                "Polynomial UM",
+                "polynomial_unsharp_metrics",
+                "polynomial_unsharp_minutiae",
+                "polynomial_unsharp_time_ms",
+            ),
+            (
+                "Sobel sharpening",
+                "sobel_sharpening_metrics",
+                "sobel_sharpening_minutiae",
+                "sobel_sharpening_time_ms",
+            ),
+        ]
+        for record in batch_records:
+            result = record["result"]
+            for method, metrics_key, minutiae_key, time_key in candidate_definitions:
+                candidate_metrics = result.get(metrics_key)
+                if candidate_metrics is None:
+                    continue
+                original_rvc = max(
+                    float(
+                        candidate_metrics.get("original_ridge_valley_clarity", 0.0)
+                    ),
+                    1e-6,
+                )
+                processed_rvc = float(
+                    candidate_metrics.get("processed_ridge_valley_clarity", 0.0)
+                )
+                evidence_rows.append(
+                    {
+                        "Fingerprint": record["filename"],
+                        "Method": method,
+                        "CII": float(candidate_metrics.get("cii", 1.0)),
+                        "Sharpness improvement (%)": float(
+                            candidate_metrics.get("sharpness_improvement_pct", 0.0)
+                        ),
+                        "RVC improvement (%)": (
+                            processed_rvc / original_rvc - 1.0
+                        )
+                        * 100.0,
+                        "SSIM": float(candidate_metrics.get("ssim", 0.0)),
+                        "Detected minutiae": int(result.get(minutiae_key, 0)),
+                        "Filter time (ms)": float(result.get(time_key, 0.0)),
+                    }
+                )
+
+        evidence_frame = pd.DataFrame(evidence_rows)
+
+        def live_grouped_bar(
+            target,
+            frame,
+            value_field,
+            title,
+            *,
+            domain=None,
+            logarithmic=False,
+        ):
+            y_scale = {}
+            if domain is not None:
+                y_scale.update({"domain": domain, "zero": False})
+            if logarithmic:
+                y_scale.update({"type": "log", "domainMin": 1})
+            y_encoding = {
+                "field": value_field,
+                "type": "quantitative",
+                "title": value_field,
+            }
+            if y_scale:
+                y_encoding["scale"] = y_scale
+            y2_encoding = None
+            if domain is not None and float(domain[0]) > 0:
+                y2_encoding = {"datum": float(domain[0])}
+            elif logarithmic:
+                y2_encoding = {"datum": 1.0}
+            chart_encoding = {
+                "x": {
+                    "field": "Fingerprint",
+                    "type": "nominal",
+                    "sort": None,
+                    "axis": {"title": "Fingerprint"},
+                },
+                "xOffset": {"field": "Method"},
+                "y": y_encoding,
+                "color": {
+                    "field": "Method",
+                    "type": "nominal",
+                    "legend": {"orient": "top"},
+                },
+                "tooltip": [
+                    {"field": "Fingerprint", "type": "nominal"},
+                    {"field": "Method", "type": "nominal"},
+                    {
+                        "field": value_field,
+                        "type": "quantitative",
+                        "format": ".3f",
+                    },
+                ],
+            }
+            if y2_encoding is not None:
+                chart_encoding["y2"] = y2_encoding
+            target.markdown(f"**{title}**")
+            target.vega_lite_chart(
+                frame,
+                {
+                    "mark": {"type": "bar", "tooltip": True},
+                    "encoding": chart_encoding,
+                    "height": 320,
+                },
+                width="stretch",
+            )
+
+        variants_tab, similar_tab, evidence_data_tab = st.tabs(
+            [
+                "UM Variant Comparison",
+                "Conventional UM vs Sobel",
+                "Evidence Data",
+            ]
+        )
+
+        with variants_tab:
+            variant_methods = ["Conventional UM", "Adaptive UM", "Polynomial UM"]
+            variant_frame = evidence_frame[
+                evidence_frame["Method"].isin(variant_methods)
+            ]
+            variant_columns_top = st.columns(2)
+            live_grouped_bar(
+                variant_columns_top[0],
+                variant_frame,
+                "CII",
+                "Contrast Improvement Index (CII)",
+                domain=[1.0, 1.5],
+            )
+            live_grouped_bar(
+                variant_columns_top[1],
+                variant_frame,
+                "SSIM",
+                "Structural Similarity (SSIM)",
+                domain=[0.90, 1.0],
+            )
+            variant_columns_bottom = st.columns(2)
+            live_grouped_bar(
+                variant_columns_bottom[0],
+                variant_frame,
+                "Sharpness improvement (%)",
+                "Sharpness Improvement",
+            )
+            live_grouped_bar(
+                variant_columns_bottom[1],
+                variant_frame,
+                "Filter time (ms)",
+                "Filter Execution Time (logarithmic scale)",
+                logarithmic=True,
+            )
+
+        with similar_tab:
+            similar_methods = ["Conventional UM", "Sobel sharpening"]
+            similar_frame = evidence_frame[
+                evidence_frame["Method"].isin(similar_methods)
+            ]
+            similar_columns_top = st.columns(2)
+            live_grouped_bar(
+                similar_columns_top[0],
+                similar_frame,
+                "CII",
+                "Contrast Improvement Index (CII)",
+                domain=[0.45, 1.5],
+            )
+            live_grouped_bar(
+                similar_columns_top[1],
+                similar_frame,
+                "SSIM",
+                "Structural Similarity (SSIM)",
+                domain=[0.85, 1.0],
+            )
+            similar_columns_bottom = st.columns(2)
+            live_grouped_bar(
+                similar_columns_bottom[0],
+                similar_frame,
+                "Sharpness improvement (%)",
+                "Sharpness Improvement",
+            )
+            live_grouped_bar(
+                similar_columns_bottom[1],
+                similar_frame,
+                "Detected minutiae",
+                "Detected Minutiae",
+            )
+
+        with evidence_data_tab:
+            st.caption(
+                "Exact per-image values used by the live charts. Download this table "
+                "to retain reproducible evidence for the report."
+            )
+            st.dataframe(evidence_frame, width="stretch", hide_index=True)
+            st.download_button(
+                "⬇️ Download UM evidence CSV",
+                evidence_frame.to_csv(index=False).encode("utf-8"),
+                "unsharp_masking_experimental_evidence.csv",
+                "text/csv",
+            )
+
     csv_bytes = enriched_summary.to_csv(index=False).encode("utf-8")
     st.download_button(
         "⬇️ Download metrics CSV", csv_bytes, "fingerprint_metrics.csv", "text/csv"

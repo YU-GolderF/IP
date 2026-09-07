@@ -3,11 +3,7 @@
 ALGORITHM_STATUS = (
     {"key": "rhlt", "name": "RHLT", "owner": "Member 1", "available": True},
     {"key": "algorithm_2", "name": "DCT-based Contextual Filtering", "owner": "Member 2", "available": True},
-<<<<<<< Updated upstream
-    {"key": "algorithm_3", "name": "Histogram Equalization", "owner": "Member 3", "available": True},
-=======
     {"key": "algorithm_3", "name": "Gabor Fingerprint Enhancement", "owner": "Member 3", "available": True},
->>>>>>> Stashed changes
     {"key": "unsharp_masking", "name": "Unsharp Masking", "owner": "Member 4", "available": True},
 )
 

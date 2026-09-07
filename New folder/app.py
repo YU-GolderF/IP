@@ -63,7 +63,7 @@ st.set_page_config(
     page_title="Fingerprint Enhancement System", page_icon="🔬", layout="wide"
 )
 st.title("Fingerprint Enhancement System")
-APP_BUILD = "report-ready-rhlt-delta-v3.9-2026-09-07"
+APP_BUILD = "report-ready-rhlt-selection-table-v4.0-2026-09-07"
 st.caption(
     "Shared preprocessing, calibration, batch ingestion and quality metrics with "
     "pluggable team algorithms. RHLT Ridge Flow Restoration is currently available."
@@ -1589,13 +1589,49 @@ with dashboard_tab:
     )
     preservation_time_cols[1].caption("Processing time by image (milliseconds).")
     if selected_algorithm == "RHLT":
-        selection_counts = (
-            numeric_batch["Selected output"].value_counts().rename("Count").to_frame()
+        selection_order = [
+            "Proposed Improved RHLT",
+            "Traditional RHLT (safety fallback)",
+            "Original (quality fallback)",
+        ]
+        selection_counts = numeric_batch["Selected output"].value_counts().reindex(
+            selection_order, fill_value=0
         )
-        st.markdown("**RHLT final-selection count**")
-        st.bar_chart(selection_counts, horizontal=True, stack=False)
+        selection_total = int(selection_counts.sum())
+        selection_summary = pd.DataFrame(
+            {
+                "Final output": selection_order,
+                "Count": [int(selection_counts[label]) for label in selection_order],
+                "Percentage": [
+                    (
+                        float(selection_counts[label]) / selection_total * 100.0
+                        if selection_total
+                        else 0.0
+                    )
+                    for label in selection_order
+                ],
+            }
+        )
+        st.markdown("**RHLT final-selection distribution**")
+        st.dataframe(
+            selection_summary,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Final output": st.column_config.TextColumn("Final output"),
+                "Count": st.column_config.NumberColumn("Count", format="%d"),
+                "Percentage": st.column_config.ProgressColumn(
+                    "Percentage",
+                    format="%.0f%%",
+                    min_value=0.0,
+                    max_value=100.0,
+                ),
+            },
+        )
         st.caption(
-            "This count makes the Proposed/Traditional fallback frequency explicit for the report."
+            "This table always shows all three possible RHLT outcomes, including zero-count "
+            "fallback categories. Selection frequency reports which candidate was returned; "
+            "it does not prove superiority in every individual quality metric."
         )
     csv_bytes = enriched_summary.to_csv(index=False).encode("utf-8")
     st.download_button(

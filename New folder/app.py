@@ -63,7 +63,7 @@ st.set_page_config(
     page_title="Fingerprint Enhancement System", page_icon="🔬", layout="wide"
 )
 st.title("Fingerprint Enhancement System")
-APP_BUILD = "report-ready-comparison-v3.8-2026-09-07"
+APP_BUILD = "report-ready-rhlt-delta-v3.9-2026-09-07"
 st.caption(
     "Shared preprocessing, calibration, batch ingestion and quality metrics with "
     "pluggable team algorithms. RHLT Ridge Flow Restoration is currently available."
@@ -1274,6 +1274,102 @@ with rhlt_internals_tab:
             )
             score_delta = float(selected.get("improved_quality_score", 0.0)) - float(
                 selected.get("traditional_quality_score", 0.0)
+            )
+            ssim_delta = float(im.get("ssim", 0.0)) - float(tm.get("ssim", 0.0))
+            st.markdown("#### Proposed structural-quality advantage")
+            st.caption(
+                "The comparison below uses Proposed minus Traditional differences so that the "
+                "small structural advantage remains readable without truncating a 0–100 axis."
+            )
+            delta_cols = st.columns(2)
+            delta_cols[0].metric(
+                "SSIM advantage",
+                f"{ssim_delta:+.3f}",
+                f"{ssim_delta * 100.0:+.2f} percentage points",
+            )
+            delta_cols[1].metric(
+                "Balanced quality advantage",
+                f"{score_delta:+.4f}",
+                f"{score_delta * 100.0:+.2f} percentage points",
+            )
+            delta_frame = pd.DataFrame(
+                {
+                    "Metric": ["SSIM", "Balanced quality score"],
+                    "Advantage (percentage points)": [
+                        ssim_delta * 100.0,
+                        score_delta * 100.0,
+                    ],
+                    "Label": [
+                        f"{ssim_delta * 100.0:+.2f} pp",
+                        f"{score_delta * 100.0:+.2f} pp",
+                    ],
+                }
+            )
+            st.vega_lite_chart(
+                delta_frame,
+                {
+                    "height": 180,
+                    "layer": [
+                        {
+                            "mark": {
+                                "type": "bar",
+                                "color": "#20A464",
+                                "cornerRadiusEnd": 4,
+                            },
+                            "encoding": {
+                                "y": {
+                                    "field": "Metric",
+                                    "type": "nominal",
+                                    "sort": None,
+                                    "axis": {"title": None},
+                                },
+                                "x": {
+                                    "field": "Advantage (percentage points)",
+                                    "type": "quantitative",
+                                    "scale": {"zero": True},
+                                    "axis": {
+                                        "title": "Proposed - Traditional (percentage points)"
+                                    },
+                                },
+                                "tooltip": [
+                                    {"field": "Metric", "type": "nominal"},
+                                    {
+                                        "field": "Advantage (percentage points)",
+                                        "type": "quantitative",
+                                        "format": "+.2f",
+                                    },
+                                ],
+                            },
+                        },
+                        {
+                            "mark": {
+                                "type": "text",
+                                "align": "left",
+                                "baseline": "middle",
+                                "dx": 6,
+                                "fontWeight": "bold",
+                            },
+                            "encoding": {
+                                "y": {
+                                    "field": "Metric",
+                                    "type": "nominal",
+                                    "sort": None,
+                                },
+                                "x": {
+                                    "field": "Advantage (percentage points)",
+                                    "type": "quantitative",
+                                },
+                                "text": {"field": "Label", "type": "nominal"},
+                            },
+                        },
+                    ],
+                },
+                width="stretch",
+            )
+            st.caption(
+                "Figure-ready delta chart: positive values favour Proposed Improved RHLT. "
+                "The values are absolute differences and indicate a small structural-quality "
+                "advantage; they do not establish statistical significance."
             )
             st.markdown(
                 "**Result statement (copy-ready, UK English):** "

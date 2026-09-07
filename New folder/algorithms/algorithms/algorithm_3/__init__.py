@@ -1,4 +1,6 @@
-"""Histogram Equalization fingerprint enhancement — placeholder for Member 3."""
+"""
+Classic Gabor Fingerprint Enhancement
+"""
 
 from .pipeline import run_algorithm
 

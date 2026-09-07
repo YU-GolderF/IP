@@ -12,7 +12,8 @@ import cv2
 import numpy as np
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.charts.legends import Legend
@@ -20,6 +21,7 @@ from reportlab.graphics.shapes import Drawing, String
 from reportlab.platypus import (
     Image,
     KeepTogether,
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -28,6 +30,46 @@ from reportlab.platypus import (
 )
 
 from core.preprocessing import ensure_uint8
+
+
+QUALITY_SCORE_WEIGHTS = {
+    "Contrast": 0.15,
+    "Ridge-valley clarity": 0.25,
+    "Edge clarity": 0.20,
+    "Structural preservation": 0.40,
+}
+
+
+def quality_score_components(metrics: dict) -> dict[str, float]:
+    """Return the normalised components used by the shared 0-100 comparison score."""
+    original_rvc = max(float(metrics.get("original_ridge_valley_clarity", 0.0)), 1e-6)
+    processed_rvc = float(metrics.get("processed_ridge_valley_clarity", 0.0))
+    original_edge = max(float(metrics.get("original_edge_clarity", 0.0)), 1e-6)
+    processed_edge = float(metrics.get("processed_edge_clarity", 0.0))
+    return {
+        "Contrast": float(np.clip(float(metrics.get("cii", 1.0)) / 1.5, 0.0, 1.0)),
+        "Ridge-valley clarity": float(
+            np.clip((processed_rvc / original_rvc) / 1.5, 0.0, 1.0)
+        ),
+        "Edge clarity": float(
+            np.clip((processed_edge / original_edge) / 1.5, 0.0, 1.0)
+        ),
+        "Structural preservation": float(
+            np.clip(float(metrics.get("ssim", 0.0)), 0.0, 1.0)
+        ),
+    }
+
+
+def balanced_quality_score(metrics: dict) -> float:
+    """Compute the shared transparent comparison score on a 0-100 scale."""
+    components = quality_score_components(metrics)
+    return float(
+        100.0
+        * sum(
+            QUALITY_SCORE_WEIGHTS[name] * components[name]
+            for name in QUALITY_SCORE_WEIGHTS
+        )
+    )
 
 
 def encode_png(image: np.ndarray) -> bytes:
@@ -68,6 +110,48 @@ def _fmt(value: object, decimals: int = 3) -> str:
     return str(value)
 
 
+def _report_styles():
+    styles = getSampleStyleSheet()
+    styles["Title"].textColor = colors.HexColor("#17365D")
+    styles["Title"].fontSize = 22
+    styles["Title"].leading = 27
+    styles["Heading2"].textColor = colors.HexColor("#1F4E78")
+    styles["Heading2"].spaceBefore = 10
+    styles["Heading2"].spaceAfter = 7
+    styles["BodyText"].leading = 13
+    styles.add(
+        ParagraphStyle(
+            name="SmallNote",
+            parent=styles["BodyText"],
+            fontSize=8,
+            leading=10,
+            textColor=colors.HexColor("#52606D"),
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="FigureCaption",
+            parent=styles["BodyText"],
+            fontSize=8,
+            leading=10,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#334E68"),
+        )
+    )
+    return styles
+
+
+def _draw_page_number(canvas, document) -> None:
+    canvas.saveState()
+    canvas.setStrokeColor(colors.HexColor("#D9E2EC"))
+    canvas.line(1.4 * cm, 1.05 * cm, A4[0] - 1.4 * cm, 1.05 * cm)
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColor(colors.HexColor("#627D98"))
+    canvas.drawString(1.4 * cm, 0.65 * cm, "Fingerprint Enhancement System")
+    canvas.drawRightString(A4[0] - 1.4 * cm, 0.65 * cm, f"Page {document.page}")
+    canvas.restoreState()
+
+
 def _grouped_bar_chart(
     title: str,
     categories: list[str],
@@ -77,14 +161,14 @@ def _grouped_bar_chart(
     value_max: float | None = None,
 ) -> Drawing:
     """Build a compact, vector grouped bar chart for the PDF report."""
-    drawing = Drawing(500, 235)
-    drawing.add(String(250, 218, title, textAnchor="middle", fontName="Helvetica-Bold", fontSize=12))
+    drawing = Drawing(500, 220)
+    drawing.add(String(250, 210, title, textAnchor="middle", fontName="Helvetica-Bold", fontSize=12))
 
     chart = VerticalBarChart()
     chart.x = 55
-    chart.y = 42
+    chart.y = 30
     chart.width = 410
-    chart.height = 145
+    chart.height = 125
     chart.data = [values for _, values, _ in series]
     chart.categoryAxis.categoryNames = categories
     chart.categoryAxis.labels.fontName = "Helvetica"
@@ -106,13 +190,14 @@ def _grouped_bar_chart(
     drawing.add(chart)
 
     legend = Legend()
-    legend.x = 315
-    legend.y = 210
+    legend.x = 55
+    legend.y = 192
     legend.fontName = "Helvetica"
-    legend.fontSize = 7
+    legend.fontSize = 6.5
     legend.dx = 7
     legend.dy = 7
-    legend.deltax = 85
+    legend.deltax = 205
+    legend.columnMaximum = 2
     legend.colorNamePairs = [(colour, label) for label, _, colour in series]
     drawing.add(legend)
     return drawing
@@ -147,7 +232,7 @@ def build_pdf_report(
         )
     )
     output = BytesIO()
-    styles = getSampleStyleSheet()
+    styles = _report_styles()
 
     document = SimpleDocTemplate(
         output,
@@ -157,11 +242,32 @@ def build_pdf_report(
         topMargin=1.4 * cm,
         bottomMargin=1.4 * cm,
     )
+    metadata_table = Table(
+        [
+            ["Algorithm", Paragraph(f"<b>{escape(algo)}</b>", styles["BodyText"])],
+            ["Input file", escape(filename)],
+            ["Pipeline build", escape(str(result.get("pipeline_build", "not recorded")))],
+            ["Generated", datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")],
+        ],
+        colWidths=[3.6 * cm, 13.6 * cm],
+    )
+    metadata_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#D9EAF7")),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#BCCCDC")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
     story = [
         Paragraph("Fingerprint Enhancement Report", styles["Title"]),
-        Paragraph(f"Algorithm: <b>{escape(algo)}</b>", styles["Normal"]),
-        Paragraph(f"Input file: {escape(filename)}", styles["Normal"]),
-        Paragraph(f"Generated: {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')}", styles["Normal"]),
+        Paragraph(
+            "Report-ready evidence for visual inspection, quantitative comparison and "
+            "reproducible algorithm evaluation.",
+            styles["SmallNote"],
+        ),
+        Spacer(1, 0.25 * cm),
+        metadata_table,
         Spacer(1, 0.4 * cm),
     ]
 
@@ -234,6 +340,42 @@ def build_pdf_report(
         )
         story.append(Spacer(1, 0.25 * cm))
 
+        config = result.get("config", {})
+        parameter_specs = [
+            ("RHLT PSF size", "psf_size"),
+            ("Topological charge", "topological_charge"),
+            ("Orientation block size", "block_size"),
+            ("Orientation bins", "orientation_bins"),
+            ("Gabor kernel size", "gabor_kernel_size"),
+            ("Gabor wavelength", "gabor_lambda"),
+            ("Maximum Gabor weight", "hybrid_gabor_max_weight"),
+            ("Frequency block size", "frequency_block_size"),
+            ("Selection tolerance", "selector_regression_tolerance"),
+        ]
+        parameter_rows = [["Parameter", "Recorded value"]] + [
+            [label, _fmt(config.get(key))] for label, key in parameter_specs
+        ]
+        parameter_table = Table(parameter_rows, colWidths=[9.0 * cm, 5.0 * cm], repeatRows=1)
+        parameter_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#486581")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#BCCCDC")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F0F4F8")]),
+            ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(Paragraph("Recorded RHLT Parameters", styles["Heading2"]))
+        story.append(parameter_table)
+        story.append(Spacer(1, 0.35 * cm))
+        story.append(PageBreak())
+        story.append(
+            Paragraph(
+                "Traditional vs Proposed Quantitative Comparison", styles["Heading2"]
+            )
+        )
+
         candidate_rows = [[
             "Metric",
             "Original",
@@ -285,6 +427,13 @@ def build_pdf_report(
             ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ]))
         story.append(candidate_table)
+        story.append(
+            Paragraph(
+                "SSIM uses the original input as the 1.000 reference. It measures structural "
+                "preservation and must not be interpreted as a percentage enhancement gain.",
+                styles["SmallNote"],
+            )
+        )
         story.append(Spacer(1, 0.45 * cm))
 
         traditional_changes = [
@@ -326,7 +475,19 @@ def build_pdf_report(
                 value_max=105.0,
             )
         )
-        story.append(Spacer(1, 0.35 * cm))
+        story.append(Spacer(1, 0.2 * cm))
+        score_delta = improved_score - traditional_score
+        story.append(
+            Paragraph(
+                "Report-ready finding: Traditional RHLT may produce marginally stronger "
+                "enhancement measurements, while the Proposed method can be selected when it "
+                "preserves structure and passes the safety checks. For this image, the "
+                f"Proposed-minus-Traditional quality-score difference was {score_delta:+.2f} "
+                "percentage points.",
+                styles["BodyText"],
+            )
+        )
+        story.append(PageBreak())
 
     # Section 2: Image comparison
     with TemporaryDirectory() as tmp_dir:
@@ -506,7 +667,7 @@ def build_pdf_report(
             Paragraph("Detailed Metrics: Original vs Enhanced", styles["Heading2"]),
             comp_table,
         ]))
-        document.build(story)
+        document.build(story, onFirstPage=_draw_page_number, onLaterPages=_draw_page_number)
     return output.getvalue()
 
 def build_comparison_report(
@@ -516,7 +677,7 @@ def build_comparison_report(
 ) -> bytes:
     """Generate a multi-algorithm comparison PDF report."""
     output = BytesIO()
-    styles = getSampleStyleSheet()
+    styles = _report_styles()
 
     document = SimpleDocTemplate(
         output,
@@ -528,8 +689,27 @@ def build_comparison_report(
     )
     story = [
         Paragraph("Multi-Algorithm Comparison Report", styles["Title"]),
-        Paragraph(f"Input file: {escape(filename)}", styles["Normal"]),
-        Paragraph(f"Generated: {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')}", styles["Normal"]),
+        Paragraph(
+            "Common benchmark using the same input, calibration and shared evaluation metrics.",
+            styles["SmallNote"],
+        ),
+        Spacer(1, 0.2 * cm),
+        Table(
+            [
+                ["Input file", escape(filename)],
+                ["Algorithms compared", str(len(results))],
+                ["Generated", datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")],
+            ],
+            colWidths=[4.0 * cm, 13.2 * cm],
+            style=TableStyle([
+                ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#D9EAF7")),
+                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#BCCCDC")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]),
+        ),
         Spacer(1, 0.4 * cm),
     ]
 
@@ -540,6 +720,45 @@ def build_comparison_report(
             p = tmp / f"{key}.png"
             p.write_bytes(encode_png(arr))
             return p
+
+        quality_scores = {
+            name: balanced_quality_score(result["metrics"])
+            for name, result in results.items()
+        }
+        winner_name = max(quality_scores, key=quality_scores.get) if quality_scores else "N/A"
+        story.append(Paragraph("Decision Summary", styles["Heading2"]))
+        story.append(
+            Paragraph(
+                f"Recommended algorithm: <b>{escape(winner_name)}</b>. The recommendation uses "
+                "the transparent balanced quality score below; it does not claim biometric "
+                "matching accuracy or substitute for clean-reference validation.",
+                styles["BodyText"],
+            )
+        )
+        score_rows = [["Component", "Weight", "Normalisation"]]
+        for component, weight in QUALITY_SCORE_WEIGHTS.items():
+            normalisation = (
+                "clip(CII / 1.5, 0, 1)"
+                if component == "Contrast"
+                else "clip(output/input ratio / 1.5, 0, 1)"
+                if component in {"Ridge-valley clarity", "Edge clarity"}
+                else "SSIM clipped to 0-1"
+            )
+            score_rows.append([component, f"{weight * 100:.0f}%", normalisation])
+        score_table = Table(score_rows, colWidths=[5.5 * cm, 2.4 * cm, 8.6 * cm], repeatRows=1)
+        score_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#486581")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#BCCCDC")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F0F4F8")]),
+            ("ALIGN", (1, 1), (1, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(score_table)
+        story.append(Spacer(1, 0.35 * cm))
 
         # Section 1: Visual Comparison
         story.append(Paragraph("Visual Comparison", styles["Heading2"]))
@@ -556,7 +775,10 @@ def build_comparison_report(
             enh_path = save_img(f"enhanced_{algo_name.replace(' ', '_')}", enh_arr)
             img_cells.append((
                 _report_image(enh_path, enh_arr, 5.0 * cm, 5.0 * cm),
-                Paragraph(escape(algo_name), styles["BodyText"])
+                Paragraph(
+                    f"{escape(algo_name)}{' - Recommended' if algo_name == winner_name else ''}",
+                    styles["FigureCaption"],
+                )
             ))
             
         # Group into rows of 3
@@ -577,24 +799,25 @@ def build_comparison_report(
         story.append(Spacer(1, 0.5 * cm))
 
         # Section 2: Leaderboard Metrics
+        story.append(PageBreak())
         story.append(Paragraph("Quantitative Benchmark", styles["Heading2"]))
         
-        comp_data = [["Algorithm", "CII", "Sharpness Δ%", "Edge Δ%", "SSIM", "RVC (orig)", "RVC (enh)", "Time (ms)"]]
+        comp_data = [["Algorithm", "Score", "CII", "Sharp. delta", "Edge delta", "SSIM", "RVC delta", "Time (ms)"]]
         
         for algo_name, result in results.items():
             m = result["metrics"]
             comp_data.append([
                 algo_name,
+                f"{quality_scores[algo_name]:.1f}/100",
                 f"{m.get('cii', 1.0):.2f}x",
                 f"{m.get('sharpness_improvement_pct', 0.0):+.1f}%",
                 f"{m.get('edge_improvement_pct', 0.0):+.1f}%",
                 f"{m.get('ssim', 0.0):.3f}",
-                f"{m.get('original_ridge_valley_clarity', 0.0):.0f}",
-                f"{m.get('processed_ridge_valley_clarity', 0.0):.0f}",
+                f"{_percentage_change(m, 'original_ridge_valley_clarity', 'processed_ridge_valley_clarity'):+.1f}%",
                 f"{result.get('processing_time_ms', 0.0):.1f}"
             ])
             
-        comp_table = Table(comp_data, colWidths=[4.0 * cm, 1.8 * cm, 2.5 * cm, 2.0 * cm, 1.5 * cm, 2.0 * cm, 2.0 * cm, 2.0 * cm])
+        comp_table = Table(comp_data, colWidths=[3.2 * cm, 1.8 * cm, 1.4 * cm, 2.4 * cm, 2.2 * cm, 1.4 * cm, 2.1 * cm, 2.0 * cm])
         comp_table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2B4590")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -610,16 +833,46 @@ def build_comparison_report(
         story.append(comp_table)
         story.append(Spacer(1, 0.5 * cm))
 
-        # Section 3: Best Algorithm Conclusion
-        def _score(m: dict) -> float:
-            return (
-                float(m.get("cii", 1.0))
-                + float(m.get("sharpness_improvement_pct", 0.0)) / 100.0
-                + float(m.get("edge_improvement_pct", 0.0)) / 100.0
+        component_names = list(QUALITY_SCORE_WEIGHTS)
+        palette = [
+            colors.HexColor("#315EAD"),
+            colors.HexColor("#20A464"),
+            colors.HexColor("#F59E0B"),
+            colors.HexColor("#8B5CF6"),
+            colors.HexColor("#DC5A5A"),
+        ]
+        component_series = []
+        for index, (algo_name, result) in enumerate(results.items()):
+            components = quality_score_components(result["metrics"])
+            component_series.append(
+                (
+                    algo_name,
+                    [components[name] * 100.0 for name in component_names],
+                    palette[index % len(palette)],
+                )
             )
+        story.append(
+            _grouped_bar_chart(
+                "Normalised Quality Components (Higher Is Better)",
+                ["Contrast", "RVC", "Edge", "Structure"],
+                component_series,
+                value_max=105.0,
+            )
+        )
+        story.append(
+            Paragraph(
+                "SSIM measures structural preservation against the original 1.000 reference; "
+                "it is not reported as an enhancement percentage. Runtime is excluded from "
+                "the quality score and must be considered separately.",
+                styles["SmallNote"],
+            )
+        )
 
+        # Section 3: Best Algorithm Conclusion
         if results:
-            best_overall = max(results.items(), key=lambda x: _score(x[1]["metrics"]))
+            best_overall = max(
+                results.items(), key=lambda x: balanced_quality_score(x[1]["metrics"])
+            )
             fastest = min(results.items(), key=lambda x: x[1].get("processing_time_ms", 9999))
             sharpest = max(
                 results.items(),
@@ -628,12 +881,12 @@ def build_comparison_report(
 
             awards_data = [
                 ["Award", "Algorithm", "Detail"],
-                ["\U0001f947 Best Overall", best_overall[0], f"Score: {_score(best_overall[1]['metrics']):.3f}"],
-                ["\u26a1 Fastest", fastest[0], f"{fastest[1].get('processing_time_ms', 0):.1f} ms"],
-                ["\U0001f50d Sharpest", sharpest[0],
+                ["Best balanced quality", best_overall[0], f"{balanced_quality_score(best_overall[1]['metrics']):.1f}/100"],
+                ["Fastest processing", fastest[0], f"{fastest[1].get('processing_time_ms', 0):.1f} ms"],
+                ["Highest sharpness", sharpest[0],
                  f"{sharpest[1]['metrics'].get('sharpness_improvement_pct', 0.0):+.1f}%"],
             ]
-            awards_table = Table(awards_data, colWidths=[4.0 * cm, 6.0 * cm, 6.0 * cm])
+            awards_table = Table(awards_data, colWidths=[5.0 * cm, 6.5 * cm, 5.0 * cm])
             awards_table.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2B4590")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -648,5 +901,5 @@ def build_comparison_report(
             story.append(Paragraph("Best Algorithm Awards", styles["Heading2"]))
             story.append(awards_table)
 
-        document.build(story)
+        document.build(story, onFirstPage=_draw_page_number, onLaterPages=_draw_page_number)
     return output.getvalue()

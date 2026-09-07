@@ -159,6 +159,17 @@ def fingerprint_region(
     return np.asarray(image)[y0:y1, x0:x1]
 
 
+def report_ridge_region(image: np.ndarray) -> np.ndarray:
+    """Return the fixed ridge ROI used by the Chapter 4 comparison figures."""
+    array = np.asarray(image)
+    height, width = array.shape[:2]
+    x0, y0 = int(round(width * 285 / 800)), int(round(height * 145 / 800))
+    x1, y1 = int(round(width * 555 / 800)), int(round(height * 505 / 800))
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(width, max(x0 + 1, x1)), min(height, max(y0 + 1, y1))
+    return array[y0:y1, x0:x1]
+
+
 def amplified_difference(
     first: np.ndarray, second: np.ndarray, gain: float
 ) -> np.ndarray:
@@ -1413,12 +1424,93 @@ with dashboard_tab:
             f"{len(batch_records)} processed fingerprint image(s). Hover over a bar "
             "to inspect its exact value."
         )
+        st.markdown("#### Selected-fingerprint visual comparisons")
+        st.caption(
+            f"Generated live for {selected_name}. Every method uses the same input, "
+            "preprocessing and fixed enlarged ridge region."
+        )
+
+        def render_um_visual_comparison(items, *, image_width="stretch"):
+            for column, (label, image) in zip(st.columns(len(items)), items):
+                column.image(
+                    image,
+                    caption=label,
+                    clamp=True,
+                    width=image_width,
+                )
+            for column, (label, image) in zip(st.columns(len(items)), items):
+                column.image(
+                    report_ridge_region(image),
+                    caption=f"Enlarged ridge region · {label}",
+                    clamp=True,
+                    width=image_width,
+                )
+
+        def render_compact_paired_comparison(items):
+            panels = []
+            for label, image in items:
+                panels.extend(
+                    [
+                        (f"{label} · Full", image),
+                        (f"{label} · Enlarged", report_ridge_region(image)),
+                    ]
+                )
+            for column, (label, image) in zip(st.columns(len(panels)), panels):
+                column.image(image, caption=label, clamp=True, width="stretch")
+
+        sobel_visual_tab, variants_visual_tab, final_pipeline_visual_tab = st.tabs(
+            [
+                "Conventional UM vs Sobel Visual",
+                "UM Variants Visual",
+                "Final Polynomial UM Pipeline",
+            ]
+        )
+        with sobel_visual_tab:
+            st.caption(
+                "Each method is shown as a full fingerprint followed by the same "
+                "enlarged ridge region."
+            )
+            render_compact_paired_comparison(
+                [
+                    ("Original", selected["source_original"]),
+                    ("Conventional UM", selected["conventional_unsharp"]),
+                    ("Sobel sharpening", selected["sobel_sharpening"]),
+                ]
+            )
+        with variants_visual_tab:
+            render_um_visual_comparison(
+                [
+                    ("Original", selected["source_original"]),
+                    ("Conventional UM", selected["conventional_unsharp"]),
+                    ("Adaptive UM", selected["adaptive_unsharp"]),
+                    ("Polynomial UM", selected["polynomial_unsharp"]),
+                ]
+            )
+        with final_pipeline_visual_tab:
+            st.caption(
+                "Final selected enhancement and common post-processing stages. "
+                "Green circles indicate ridge endings and red squares indicate bifurcations."
+            )
+            final_pipeline_items = [
+                ("Original", selected["source_original"]),
+                ("Polynomial UM", selected["polynomial_unsharp"]),
+                ("Binary ridges", selected["ridge_binary"]),
+                ("Skeleton", selected["skeleton"].astype("uint8") * 255),
+                ("Minutiae overlay", selected["minutiae_overlay"]),
+            ]
+            for column, (label, image) in zip(
+                st.columns(len(final_pipeline_items)), final_pipeline_items
+            ):
+                column.image(image, caption=label, clamp=True, width="stretch")
+
         if len(loaded_images) > 1 and not batch_is_ready:
             st.info(
-                f"The charts currently show {selected_name} only. Select "
+                f"The quantitative charts currently show {selected_name} only. Select "
                 f"**Process all {len(loaded_images)} fingerprints** above to reproduce "
                 "the dataset-level report figures."
             )
+
+        st.markdown("#### Five-image quantitative comparisons")
 
         evidence_rows = []
         candidate_definitions = [

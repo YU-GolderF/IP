@@ -753,7 +753,7 @@ def build_comparison_report(
                 f"{result.get('processing_time_ms', 0.0):.1f}"
             ])
             
-        comp_table = Table(comp_data, colWidths=[4.0 * cm, 1.8 * cm, 2.5 * cm, 2.0 * cm, 1.5 * cm, 2.0 * cm, 2.0 * cm, 2.0 * cm])
+        comp_table = Table(comp_data, colWidths=[4.5 * cm, 1.8 * cm, 2.5 * cm, 2.0 * cm, 1.5 * cm, 2.0 * cm, 2.0 * cm, 2.0 * cm])
         comp_table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2B4590")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),

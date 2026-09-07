@@ -599,11 +599,12 @@ with overview_tab:
         st.caption(
             "Fingerprint-evidence comparison. Each candidate uses the same input and the same downstream evaluation layer."
         )
-        original_column, hard_column, soft_column, improved_column = st.columns(4)
+        original_column, hard_column, soft_column, confidence_column, improved_column = st.columns(5)
         original_column.image(selected["source_original"], caption="Original fingerprint", use_container_width=True)
         for column, method, caption in (
             (hard_column, "basic_dct", "Basic DCT contextual filtering"),
             (soft_column, "adaptive_frequency", "DCT + adaptive frequency"),
+            (confidence_column, "confidence_aware", "DCT + confidence-aware filtering"),
             (improved_column, "proposed", "Proposed full DCT method"),
         ):
             column.image(selected["method_results"][method]["image"], caption=caption, clamp=True, use_container_width=True)
